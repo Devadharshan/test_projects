@@ -43,3 +43,19 @@ send_email(job_info)
 #test 
 
 autorep_output=$(autorep | awk 'NR > 6 {print $1, $5, $7}')
+
+
+
+# test new function 
+
+def get_job_status(job_names):
+    job_info = []
+    for job_name in job_names:
+        command = f"autorep -J {job_name} | grep -E 'Job Name|Last End|ST/Ex'"
+        result = subprocess.run(command, shell=True, capture_output=True, text=True)
+
+        # Extract Job Name, Last End, and ST/Ex information
+        job_data = [line.split(":")[1].strip() for line in result.stdout.split('\n') if line.strip()]
+        job_info.append(f"Job Name: {job_name}, {', '.join(job_data)}")
+
+    return job_info
