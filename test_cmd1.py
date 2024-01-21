@@ -35,3 +35,11 @@ job_info = get_job_status(job_to_check)
 
 # Send email with job information
 send_email(job_info)
+
+
+
+
+
+#test 
+
+autorep_output=$(autorep | awk 'NR > 6 {print $1, $5, $7}')
