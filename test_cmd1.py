@@ -59,3 +59,26 @@ def get_job_status(job_names):
         job_info.append(f"Job Name: {job_name}, {', '.join(job_data)}")
 
     return job_info
+
+
+
+
+# testing new function 
+
+for job_name in job_names:
+        command = f"autorep -J {job_name} | grep -E 'Job Name|ST/Ex|Last Run'"
+        result = subprocess.run(command, shell=True, capture_output=True, text=True)
+
+        # Extract Job Name, ST/Ex, and Last Run information
+        lines = [line.split(":") for line in result.stdout.split('\n') if line.strip()]
+        
+        job_data = []
+        for line in lines:
+            if len(line) == 2:
+                job_data.append(line[1].strip())
+            else:
+                job_data.append("N/A")
+
+        job_info.append(f"Job Name: {job_name}, {', '.join(job_data)}")
+
+    return job_info
