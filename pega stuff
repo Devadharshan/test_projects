@@ -1,0 +1,25 @@
+import requests
+
+# Replace these with your Pega credentials and base URL
+pega_url = "https://your-pega-instance-url"
+username = "your-username"
+password = "your-password"
+
+# Pega API endpoint for stream nodes
+stream_nodes_endpoint = f"{pega_url}/prweb/api/v1/nodes"
+
+# Set up authentication
+auth = (username, password)
+
+# Make a request to get stream nodes status
+response = requests.get(stream_nodes_endpoint, auth=auth)
+
+# Check if the request was successful (status code 200)
+if response.status_code == 200:
+    stream_nodes_data = response.json()
+    
+    # Process the stream nodes data as needed
+    for node in stream_nodes_data['nodes']:
+        print(f"Node: {node['nodeName']}, Status: {node['status']}")
+else:
+    print(f"Failed to retrieve stream nodes. Status code: {response.status_code}")
