@@ -1,0 +1,42 @@
+import subprocess
+import smtplib
+from email.mime.text import MIMEText
+
+def get_jobs_status(job_names):
+    job_statuses = {}
+    for job_name in job_names:
+        command = f'autorep -j {job_name}'
+        result = subprocess.run(command, shell=True, capture_output=True, text=True)
+        job_statuses[job_name] = result.stdout
+    return job_statuses
+
+def filter_failed_jobs(job_statuses):
+    failed_jobs = {job: status for job, status in job_statuses.items() if 'FAILURE' in status}
+    return failed_jobs
+
+def send_email(subject, body, to_address):
+    # (Use your SMTP configuration)
+    smtp_server = 'your_smtp_server'
+    smtp_port = 587
+    smtp_username = 'your_username'
+    smtp_password = 'your_password'
+
+    msg = MIMEText(body)
+    msg['Subject'] = subject
+    msg['From'] = 'sender@example.com'
+    msg['To'] = to_address
+
+    with smtplib.SMTP(smtp_server, smtp_port) as server:
+        server.starttls()
+        server.login(smtp_username, smtp_password)
+        server.sendmail('sender@example.com', to_address, msg.as_string())
+
+# Example usage
+job_names = ['job1', 'job2', 'job3']  # Add your job names here
+job_statuses = get_jobs_status(job_names)
+failed_jobs = filter_failed_jobs(job_statuses)
+
+if failed_jobs:
+    email_subject = 'Failed AutoSys Jobs'
+    email_body = '\n\n'.join([f'{job}:\n{status}' for job, status in failed_jobs.items()])
+    send_email(email_subject, email_body, 'recipient@example.com')
