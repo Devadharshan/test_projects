@@ -54,3 +54,35 @@ with smtplib.SMTP(smtp_server, smtp_port) as server:
 # Remove the temporary file
 import os
 os.remove(temp_file)
+
+
+
+
+
+#!/bin/bash
+
+# List of hosts
+hosts=("host1" "host2" "host3")
+
+# File to check
+file_path="/path/to/your/file.txt"
+
+# Email configuration
+recipient="your@email.com"
+subject="File Size Report"
+
+# Temporary file to store the report
+temp_file="/tmp/file_size_report.txt"
+
+# Loop through hosts and check file size
+for host in "${hosts[@]}"; do
+    echo "Checking file size on $host:" >> "$temp_file"
+    ssh "$host" "du -h $file_path" >> "$temp_file"
+    echo -e "\n" >> "$temp_file"
+done
+
+# Send email with the report
+mail -s "$subject" "$recipient" < "$temp_file"
+
+# Remove the temporary file
+rm "$temp_file"
