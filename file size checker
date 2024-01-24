@@ -1,0 +1,56 @@
+import paramiko
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+# List of hosts
+hosts = ["host1", "host2", "host3"]
+
+# File to check
+file_path = "/path/to/your/file.txt"
+
+# Email configuration
+sender_email = "your@gmail.com"
+recipient_email = "recipient@email.com"
+subject = "File Size Report"
+smtp_server = "smtp.gmail.com"
+smtp_port = 587
+smtp_username = "your@gmail.com"
+smtp_password = "your_password"
+
+# Temporary file to store the report
+temp_file = "/tmp/file_size_report.txt"
+
+# Function to check file size on a host
+def check_file_size(host):
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    try:
+        ssh.connect(host)
+        stdin, stdout, stderr = ssh.exec_command(f"du -h {file_path}")
+        result = stdout.read().decode("utf-8")
+        return f"Checking file size on {host}:\n{result}\n"
+    finally:
+        ssh.close()
+
+# Loop through hosts and check file size
+report = ""
+for host in hosts:
+    report += check_file_size(host)
+
+# Send email with the report
+message = MIMEMultipart()
+message["From"] = sender_email
+message["To"] = recipient_email
+message["Subject"] = subject
+message.attach(MIMEText(report, "plain"))
+
+with smtplib.SMTP(smtp_server, smtp_port) as server:
+    server.starttls()
+    server.login(smtp_username, smtp_password)
+    server.sendmail(sender_email, recipient_email, message.as_string())
+
+# Remove the temporary file
+import os
+os.remove(temp_file)
