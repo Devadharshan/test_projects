@@ -1,0 +1,32 @@
+import pyodbc
+
+# Replace these values with your actual database connection details
+server_name = 'your_server_name'
+database_name = 'your_database_name'
+username = 'your_username'
+password = 'your_password'
+
+# Establish a connection
+connection_string = f'DRIVER={{FreeTDS}};SERVER={server_name};DATABASE={database_name};UID={username};PWD={password}'
+connection = pyodbc.connect(connection_string)
+
+# Create a cursor
+cursor = connection.cursor()
+
+# Switch to the desired database
+cursor.execute(f'USE {database_name}')
+
+# Execute sp_helpuser
+username_to_check = 'your_username'  # Replace with the actual username
+cursor.execute(f'sp_helpuser {username_to_check}')
+
+# Fetch the results
+results = cursor.fetchall()
+
+# Display the results
+for row in results:
+    print(row)
+
+# Close the cursor and connection
+cursor.close()
+connection.close()
