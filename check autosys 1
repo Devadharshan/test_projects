@@ -1,0 +1,53 @@
+import subprocess
+import smtplib
+from email.mime.text import MIMEText
+
+# Function to check AutoSys job status
+def check_job_status(job_name):
+    try:
+        # Replace 'autorep' with the actual AutoSys command to check job status
+        result = subprocess.run(['autorep', '-J', job_name], capture_output=True, text=True)
+        output = result.stdout
+        return "Success" if "Status: SU" in output else "Failure" if "Status: FA" in output else "Unknown"
+    except Exception as e:
+        return f"Error checking job status: {e}"
+
+# Function to send email
+def send_email(job_name, job_status):
+    smtp_server = 'your_smtp_server'
+    smtp_port = 587
+    sender_email = 'your_sender_email@example.com'
+    receiver_email = 'your_receiver_email@example.com'
+    smtp_username = 'your_smtp_username'
+    smtp_password = 'your_smtp_password'
+
+    subject = f'AutoSys Job Status: {job_name}'
+    body = f'The AutoSys job "{job_name}" has {job_status}.'
+
+    # Customize the email body based on the job status
+    if job_status == "Success":
+        body += "\nJob completed successfully. :green_heart:"
+    elif job_status == "Failure":
+        body += "\nJob failed or terminated. :red_circle:"
+    else:
+        body += "\nJob status is unknown. :question:"
+
+    message = MIMEText(body)
+    message['Subject'] = subject
+    message['From'] = sender_email
+    message['To'] = receiver_email
+
+    try:
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()
+            server.login(smtp_username, smtp_password)
+            server.sendmail(sender_email, receiver_email, message.as_string())
+    except Exception as e:
+        print(f"Error sending email: {e}")
+
+# Example usage
+job_name = 'your_autosys_job_name'
+job_status = check_job_status(job_name)
+
+if job_status != "Unknown":
+    send_email(job_name, job_status)
