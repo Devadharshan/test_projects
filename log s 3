@@ -1,0 +1,24 @@
+from docx import Document
+
+def search_text_in_word_file(file_path, target_text):
+    doc = Document(file_path)
+    paragraphs_with_text = []
+
+    for paragraph in doc.paragraphs:
+        if target_text in paragraph.text:
+            paragraphs_with_text.append(paragraph.text)
+
+    return paragraphs_with_text
+
+if __name__ == "__main__":
+    word_file_path = 'path/to/your/document.docx'  # Replace with the path to your Word document
+    search_target = 'your_search_text'  # Replace with the text you want to search for
+
+    result = search_text_in_word_file(word_file_path, search_target)
+
+    if result:
+        print(f"Found '{search_target}' in the following paragraphs:")
+        for paragraph in result:
+            print(paragraph)
+    else:
+        print(f"No occurrences of '{search_target}' found in the document.")
