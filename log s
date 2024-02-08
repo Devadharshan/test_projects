@@ -1,0 +1,44 @@
+import re
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+def grep_and_send_email(file_path, keyword, recipient_email):
+    # Step 1: Read content from the file
+    with open(file_path, 'r') as file:
+        file_content = file.read()
+
+    # Step 2: Use regular expression to grep for the keyword
+    matches = re.findall(f'\b{re.escape(keyword)}\b', file_content, re.IGNORECASE)
+
+    if matches:
+        # Step 3: Extract relevant content
+        matched_content = '\n'.join(matches)
+
+        # Step 4: Send content in an email
+        send_email(matched_content, recipient_email)
+
+def send_email(content, recipient_email):
+    # Set up email server and credentials
+    smtp_server = 'your_smtp_server'
+    smtp_port = 587
+    smtp_username = 'your_username'
+    smtp_password = 'your_password'
+
+    # Set up MIME structure
+    message = MIMEMultipart()
+    message['From'] = 'your_email@gmail.com'
+    message['To'] = recipient_email
+    message['Subject'] = 'Matching Keyword Found'
+
+    # Attach content to the email
+    message.attach(MIMEText(content, 'plain'))
+
+    # Connect to SMTP server and send email
+    with smtplib.SMTP(smtp_server, smtp_port) as server:
+        server.starttls()
+        server.login(smtp_username, smtp_password)
+        server.sendmail('your_email@gmail.com', recipient_email, message.as_string())
+
+# Example usage
+grep_and_send_email('path/to/your/file.txt', 'your_keyword', 'recipient@example.com')
