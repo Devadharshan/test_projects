@@ -8,3 +8,38 @@ try:
     print(result.stdout)
 except subprocess.CalledProcessError as e:
     print(f"Error: {e}")
+
+
+
+# new changes
+
+import requests
+from bs4 import BeautifulSoup
+
+# List of URLs to scrape
+urls = ['https://example1.com', 'https://example2.com', 'https://example3.com']
+
+# Function to scrape and write to a file
+def scrape_and_write(url, output_file):
+    try:
+        response = requests.get(url)
+        response.raise_for_status()  # Raise HTTPError for bad responses
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Extract information you want from the BeautifulSoup object
+        # For example, let's get the title of the page
+        title = soup.title.text
+
+        with open(output_file, 'a') as file:
+            file.write(f"URL: {url}\nTitle: {title}\n\n")
+
+    except requests.exceptions.RequestException as e:
+        print(f"Error for {url}: {e}")
+
+# Output file
+output_file_path = "output.txt"
+
+# Iterate through URLs and scrape each one
+for url in urls:
+    scrape_and_write(url, output_file_path)
