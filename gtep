@@ -119,3 +119,25 @@ file_path = 'your_file.txt'
 sentences_to_remove = ['Sentence to remove 1.', 'Sentence to remove 2.']
 
 remove_sentences_from_file(file_path, sentences_to_remove)
+
+
+$$$ new 
+
+def extract_key_value_pairs(file_path, keys_to_extract):
+    result = {}
+
+    with open(file_path, 'r') as file:
+        for line in file:
+            for key in keys_to_extract:
+                if key in line:
+                    value = line.split(': ')[1].strip()
+                    result[key] = value
+
+    return result
+
+# Example usage:
+file_path = 'your_file.txt'
+keys_to_extract = ['name', 'age', 'city']
+
+extracted_data = extract_key_value_pairs(file_path, keys_to_extract)
+print(extracted_data)
