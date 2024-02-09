@@ -98,4 +98,24 @@ def remove_words_from_file(file_path, words_to_remove):
 file_path = 'your_file.txt'
 words_to_remove = ['word1', 'word2', 'word3']
 
-remove_words_from_file(file_path, words_to_remove)
+remove_words_from_file(file_path, words_to_remove
+
+
+
+# addine 
+
+def remove_sentences_from_file(file_path, sentences_to_remove):
+    with open(file_path, 'r') as file:
+        content = file.read()
+
+    for sentence in sentences_to_remove:
+        content = content.replace(sentence, '')
+
+    with open(file_path, 'w') as file:
+        file.write(content)
+
+# Example usage:
+file_path = 'your_file.txt'
+sentences_to_remove = ['Sentence to remove 1.', 'Sentence to remove 2.']
+
+remove_sentences_from_file(file_path, sentences_to_remove)
