@@ -1,0 +1,10 @@
+import subprocess
+
+file_path = "your_file.txt"
+pattern_to_search = "your_pattern"
+
+try:
+    result = subprocess.run(['grep', pattern_to_search, file_path], check=True, text=True, capture_output=True)
+    print(result.stdout)
+except subprocess.CalledProcessError as e:
+    print(f"Error: {e}")
