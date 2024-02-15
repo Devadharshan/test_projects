@@ -1,0 +1,49 @@
+import requests
+from bs4 import BeautifulSoup
+import smtplib
+from email.mime.text import MIMEText
+
+# Function to scrape the website and find failed elements
+def scrape_and_send_email():
+    # Replace 'your_url_here' with the actual URL you want to scrape
+    url = 'your_url_here'
+    response = requests.get(url)
+
+    if response.status_code == 200:
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # Replace 'failed_tag_class' with the actual class or identifier of the failed elements
+        failed_elements = soup.find_all(class_='failed_tag_class')
+
+        if failed_elements:
+            # Extract the entire tag content
+            failed_tags_content = [str(tag) for tag in failed_elements]
+
+            # Replace 'your_email@example.com' with the actual email address to send the email from
+            sender_email = 'your_email@example.com'
+            # Replace 'recipient_email@example.com' with the actual recipient email address
+            recipient_email = 'recipient_email@example.com'
+            # Replace 'your_email_password' with your actual email password
+            email_password = 'your_email_password'
+
+            # Compose the email
+            subject = 'Failed Elements Report'
+            body = '\n'.join(failed_tags_content)
+            msg = MIMEText(body)
+            msg['Subject'] = subject
+            msg['From'] = sender_email
+            msg['To'] = recipient_email
+
+            # Connect to the SMTP server (in this example, using Gmail)
+            with smtplib.SMTP('smtp.gmail.com', 587) as server:
+                server.starttls()
+                server.login(sender_email, email_password)
+                server.sendmail(sender_email, recipient_email, msg.as_string())
+            print('Email sent successfully!')
+        else:
+            print('No failed elements found on the webpage.')
+    else:
+        print(f'Failed to retrieve the webpage. Status code: {response.status_code}')
+
+# Call the function to scrape and send email
+scrape_and_send_email()
