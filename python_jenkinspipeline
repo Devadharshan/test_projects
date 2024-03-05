@@ -1,0 +1,37 @@
+pipeline {
+    agent any
+
+    stages {
+        stage('Build') {
+            steps {
+                script {
+                    // Clone your Git repository (replace the repository URL)
+                    git 'https://github.com/your-username/your-python-repo.git'
+                }
+            }
+        }
+
+        stage('Run Python Script') {
+            steps {
+                script {
+                    // Set up a virtual environment (optional)
+                    sh 'python3 -m venv venv'
+                    sh 'source venv/bin/activate'
+
+                    // Install dependencies (if any)
+                    sh 'pip install -r requirements.txt'
+
+                    // Run your Python script (replace script.py with your actual script)
+                    sh 'python script.py'
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            // Clean up (deactivate virtual environment, etc.)
+            sh 'deactivate || true'
+        }
+    }
+}
