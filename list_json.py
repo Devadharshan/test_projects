@@ -110,3 +110,26 @@ json_string = json.dumps(my_list)
 # Print the resulting JSON string
 print(json_string)
 
+
+
+# new change
+
+import json
+
+class State:
+    def __init__(self, value):
+        self.value = value
+
+def serialize_state(obj):
+    if isinstance(obj, State):
+        return obj.__dict__
+    raise TypeError("Object not serializable")
+
+# Example Python list with custom objects
+my_list = [State(1), State(2), State(3)]
+
+# Convert the list to a JSON string using the serialization function
+json_string = json.dumps(my_list, default=serialize_state)
+
+# Print the resulting JSON string
+print(json_string)
