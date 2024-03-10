@@ -27,3 +27,32 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+import os
+import streamlit as st
+
+def get_disk_space(path):
+    total, used, free = map(int, os.statvfs(path).fuse_blocks[:3])
+    return total * 4, used * 4, free * 4  # Convert from 1k blocks to MB
+
+def main():
+    st.title("Disk Space Viewer")
+
+    directory_path = st.text_input("Enter Directory Path:", "/your/directory/path")
+    if not os.path.exists(directory_path):
+        st.error("Invalid path. Please enter a valid directory path.")
+        return
+
+    total_space, used_space, free_space = get_disk_space(directory_path)
+
+    st.write(f"Total Space in {directory_path}: {total_space} MB")
+    st.write(f"Used Space in {directory_path}: {used_space} MB")
+    st.write(f"Free Space in {directory_path}: {free_space} MB")
+
+if __name__ == "__main__":
+    main()
