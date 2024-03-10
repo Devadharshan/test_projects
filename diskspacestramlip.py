@@ -56,3 +56,16 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+# changes
+
+def get_disk_space(path):
+    disk_usage = psutil.disk_usage(path)
+    total_space = disk_usage.total
+    used_space = disk_usage.used
+    free_space = disk_usage.free
+    return total_space, used_space, free_space
