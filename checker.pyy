@@ -1,0 +1,46 @@
+import csv
+import requests
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+def check_urls(csv_file):
+    down_urls = []
+    with open(csv_file, 'r') as file:
+        reader = csv.DictReader(file)
+        for row in reader:
+            url = row['URL']
+            try:
+                response = requests.get(url)
+                if response.status_code != 200:
+                    down_urls.append(url)
+            except requests.ConnectionError:
+                down_urls.append(url)
+    return down_urls
+
+def send_email(down_urls):
+    if down_urls:
+        from_email = 'your_email@example.com'
+        to_email = 'recipient@example.com'
+        subject = 'List of Down URLs'
+        body = 'The following URLs are down:\n\n'
+        body += '\n'.join(down_urls)
+
+        msg = MIMEMultipart()
+        msg['From'] = from_email
+        msg['To'] = to_email
+        msg['Subject'] = subject
+
+        msg.attach(MIMEText(body, 'plain'))
+
+        server = smtplib.SMTP('smtp.example.com', 587)
+        server.starttls()
+        server.login(from_email, 'your_password')
+        text = msg.as_string()
+        server.sendmail(from_email, to_email, text)
+        server.quit()
+
+# Example usage:
+csv_file = 'urls.csv'
+down_urls = check_urls(csv_file)
+send_email(down_urls)
