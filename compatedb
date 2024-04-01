@@ -1,0 +1,52 @@
+import pypyodbc
+
+# Define connection parameters for Sybase databases
+db1_conn_str = 'Driver={Adaptive Server Enterprise};Server=server1;Port=port_number;Database=database_name;UID=username;PWD=password;'
+db2_conn_str = 'Driver={Adaptive Server Enterprise};Server=server2;Port=port_number;Database=database_name;UID=username;PWD=password;'
+
+# Connect to the databases
+db1_conn = pypyodbc.connect(db1_conn_str)
+db2_conn = pypyodbc.connect(db2_conn_str)
+
+# Function to get row count for a table
+def get_row_count(conn, table_name):
+    cursor = conn.cursor()
+    cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+    row_count = cursor.fetchone()[0]
+    return row_count
+
+# Function to compare row counts between databases
+def compare_row_counts(table_name):
+    db1_row_count = get_row_count(db1_conn, table_name)
+    db2_row_count = get_row_count(db2_conn, table_name)
+    diff = db1_row_count - db2_row_count
+    print(f"Table: {table_name}, Difference: {diff}")
+
+# Get table names from database 1
+db1_cursor = db1_conn.cursor()
+db1_cursor.execute("SELECT name FROM sysobjects WHERE type='U'")
+db1_table_names = [row[0] for row in db1_cursor.fetchall()]
+
+# Get table names from database 2
+db2_cursor = db2_conn.cursor()
+db2_cursor.execute("SELECT name FROM sysobjects WHERE type='U'")
+db2_table_names = [row[0] for row in db2_cursor.fetchall()]
+
+# Compare row counts for tables present in both databases
+common_tables = set(db1_table_names).intersection(db2_table_names)
+for table_name in common_tables:
+    compare_row_counts(table_name)
+
+# Check for tables in database 1 that are not present in database 2
+for table_name in db1_table_names:
+    if table_name not in db2_table_names:
+        print(f"Table '{table_name}' not found in database 2")
+
+# Check for tables in database 2 that are not present in database 1
+for table_name in db2_table_names:
+    if table_name not in db1_table_names:
+        print(f"Table '{table_name}' not found in database 1")
+
+# Close connections
+db1_conn.close()
+db2_conn.close()
