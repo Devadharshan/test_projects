@@ -134,3 +134,29 @@ else:
 
 
 
+
+import csv
+
+# Function to read the first row of a CSV file
+def read_first_row(file_path):
+    with open(file_path, 'r', newline='') as file:
+        reader = csv.reader(file)
+        first_row = next(reader)  # Read the first row
+        return first_row
+
+# Input CSV file path
+csv_file_path = 'servers.csv'  # Assuming the file is named 'servers.csv'
+
+# Read the first row of the CSV file
+first_row = read_first_row(csv_file_path)
+
+# Print the values from the first row
+if len(first_row) >= 2:  # Ensure there are at least two columns in the first row
+    server1_dbname1 = first_row[0]  # Value from the first column
+    server2_dbname2 = first_row[1]  # Value from the second column
+    print("server1.dbname1:", server1_dbname1)
+    print("server2.dbname2:", server2_dbname2)
+else:
+    print("The first row does not contain enough columns.")
+
+
