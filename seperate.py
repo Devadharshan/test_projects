@@ -49,3 +49,46 @@ df[['Replica Server', 'Replica DB']] = df['replicaserver.db'].str.split('.', exp
 
 # Display the DataFrame
 print(df)
+
+
+
+
+
+
+
+import csv
+
+# Function to separate server name and database name from a value like "server1.dbname1"
+def separate_server_and_db(value):
+    server, db = value.split('.')
+    return server, db
+
+# Function to read and separate rows and columns of a CSV file
+def read_and_separate_servers_dbs(file_path):
+    separated_data = []
+    with open(file_path, 'r', newline='') as file:
+        reader = csv.reader(file)
+        for row in reader:
+            separated_columns = []
+            for cell in row:
+                server, db = separate_server_and_db(cell)
+                separated_columns.append((server, db))
+            separated_data.append(separated_columns)
+    return separated_data
+
+# Input CSV file path
+csv_file_path = 'servers.csv'  # Assuming the file is named 'servers.csv'
+
+# Read and separate rows and columns of the CSV file
+separated_data = read_and_separate_servers_dbs(csv_file_path)
+
+# Accessing the first row, first column
+if len(separated_data) > 0 and len(separated_data[0]) > 0:
+    server, db = separated_data[0][0]
+    print("First row, first column - Server:", server)
+    print("First row, first column - Database:", db)
+else:
+    print("No data found in the CSV file.")
+
+
+
