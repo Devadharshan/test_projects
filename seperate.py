@@ -160,3 +160,43 @@ else:
     print("The first row does not contain enough columns.")
 
 
+
+
+
+
+
+# new changes 
+
+
+import csv
+
+# Function to separate server name and database name from a value like "server1.dbname1"
+def separate_server_and_db(value):
+    server, db = value.split('.')
+    return server, db
+
+# Function to read all rows of a CSV file
+def read_all_rows(file_path):
+    rows = []
+    with open(file_path, 'r', newline='') as file:
+        reader = csv.reader(file)
+        for row in reader:
+            separated_row = []
+            for cell in row:
+                server, db = separate_server_and_db(cell)
+                separated_row.append((server, db))
+            rows.append(separated_row)
+    return rows
+
+# Input CSV file path
+csv_file_path = 'servers.csv'  # Assuming the file is named 'servers.csv'
+
+# Read all rows of the CSV file and separate server and database names
+all_rows = read_all_rows(csv_file_path)
+
+# Print separated server and database names for each row
+for row_index, row in enumerate(all_rows):
+    print(f"Row {row_index + 1}:")
+    for cell_index, (server, db) in enumerate(row):
+        print(f"Column {cell_index + 1} - Server: {server}, Database: {db}")
+
