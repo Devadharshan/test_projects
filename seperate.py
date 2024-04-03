@@ -27,3 +27,25 @@ print("Master Servers:", master_servers)
 print("Master Databases:", master_dbs)
 print("Replica Servers:", replica_servers)
 print("Replica Databases:", replica_dbs)
+
+
+
+
+
+import pandas as pd
+
+# Define the filename and separator
+filename = 'your_csv_file.csv'
+sep = 'sep'  # or whatever separator you're using
+
+# Read the CSV file into a pandas DataFrame
+df = pd.read_csv(filename, sep=sep)
+
+# Split the "masterserver.dband" column into server and database columns
+df[['Master Server', 'Master DB']] = df['masterserver.dband'].str.split('.', expand=True)
+
+# Split the "replicaserver.db" column into server and database columns
+df[['Replica Server', 'Replica DB']] = df['replicaserver.db'].str.split('.', expand=True)
+
+# Display the DataFrame
+print(df)
