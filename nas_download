@@ -1,0 +1,47 @@
+import streamlit as st
+import os
+import shutil
+
+def download_files(file_paths):
+    download_paths = []
+    for file_path in file_paths:
+        try:
+            # Get the filename from the file path
+            file_name = os.path.basename(file_path)
+            # Construct the destination path in the local download folder
+            destination_path = os.path.join(os.path.expanduser("~"), "Downloads", file_name)
+            # Copy the file from the NAS path to the local download folder
+            shutil.copy(file_path, destination_path)
+            download_paths.append(destination_path)
+        except Exception as e:
+            st.error(f"Error downloading file: {file_path} - {str(e)}")
+    return download_paths
+
+def list_files(directory):
+    return os.listdir(directory)
+
+def main():
+    st.title("NAS File Downloader")
+
+    nas_path = st.text_input("Enter NAS Path:")
+    if nas_path:
+        if os.path.exists(nas_path):
+            st.write(f"Files in {nas_path}:")
+            files = list_files(nas_path)
+            for file in files:
+                st.write(file)
+            selected_files = st.multiselect("Select files to download:", files)
+            if st.button("Download"):
+                if len(selected_files) > 0:
+                    download_paths = download_files([os.path.join(nas_path, file) for file in selected_files])
+                    if download_paths:
+                        st.success("Files downloaded successfully!")
+                        for download_path in download_paths:
+                            st.write(f"Downloaded file: {download_path}")
+                else:
+                    st.warning("Please select at least one file to download.")
+        else:
+            st.error("Invalid path. Please enter a valid NAS path.")
+
+if __name__ == "__main__":
+    main()
