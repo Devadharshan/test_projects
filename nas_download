@@ -112,3 +112,73 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+#new fix changes 
+
+import streamlit as st
+import os
+import shutil
+
+def download_files(file_paths):
+    download_paths = []
+    for file_path in file_paths:
+        try:
+            # Get the filename from the file path
+            file_name = os.path.basename(file_path)
+            # Construct the destination path in the local download folder
+            destination_path = os.path.join(os.path.expanduser("~"), "Downloads", file_name)
+            # Copy the file from the NAS path to the local download folder
+            shutil.copy(file_path, destination_path)
+            download_paths.append(destination_path)
+        except Exception as e:
+            st.error(f"Error downloading file: {file_path} - {str(e)}")
+    return download_paths
+
+def list_files(directory):
+    files = []
+    folders = []
+    for item in os.listdir(directory):
+        item_path = os.path.join(directory, item)
+        if os.path.isfile(item_path):
+            files.append(item_path)
+        elif os.path.isdir(item_path):
+            folders.append(item_path)
+    return files, folders
+
+def main():
+    st.title("NAS File Downloader")
+
+    nas_path = st.text_input("Enter NAS Path:")
+    if nas_path:
+        if os.path.exists(nas_path):
+            st.write(f"Contents of {nas_path}:")
+            files, folders = list_files(nas_path)
+
+            selected_item = st.selectbox("Select item:", [""] + [f"File: {file}" for file in files] + [f"Folder: {folder}" for folder in folders])
+
+            if st.button("Download"):
+                if selected_item.startswith("File:"):
+                    selected_file = selected_item.replace("File: ", "")
+                    download_success, download_path = download_file(selected_file)
+                    if download_success:
+                        st.success(f"File '{selected_file}' downloaded successfully! Download path: {download_path}")
+                    else:
+                        st.error(f"Error downloading file: '{selected_file}' - {download_path}")
+                elif selected_item.startswith("Folder:"):
+                    selected_folder = selected_item.replace("Folder: ", "")
+                    folder_files, _ = list_files(selected_folder)
+                    download_paths = download_files(folder_files)
+                    if download_paths:
+                        st.success("Files downloaded successfully!")
+                        for download_path in download_paths:
+                            st.write(f"Downloaded file: {download_path}")
+                else:
+                    st.warning("Please select an item to download.")
+        else:
+            st.error("Invalid path. Please enter a valid NAS path.")
+
+if __name__ == "__main__":
+    main()
