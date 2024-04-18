@@ -554,3 +554,66 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+# modified changes
+
+import os
+import streamlit as st
+
+def list_files(directory):
+    files = []
+    for filename in os.listdir(directory):
+        filepath = os.path.join(directory, filename)
+        if os.path.isfile(filepath):
+            files.append(filename)
+    return files
+
+def download_file(directory, filename):
+    filepath = os.path.join(directory, filename)
+    with open(filepath, "rb") as f:
+        data = f.read()
+    return data
+
+def main():
+    st.title("NAS File Downloader")
+
+    # Input NAS path
+    nas_path = st.text_input("Enter NAS Path")
+
+    # Check if NAS path is valid
+    if not os.path.isdir(nas_path):
+        st.error("Invalid NAS path. Please provide a valid directory path.")
+        return
+
+    selected_files = []  # List to store selected files and their respective folders
+
+    # Multiselect to select folders
+    selected_folders = st.multiselect("Select Folders", [folder for folder in os.listdir(nas_path) if os.path.isdir(os.path.join(nas_path, folder))])
+
+    # Display files for each selected folder
+    for folder in selected_folders:
+        # List files in folder
+        folder_path = os.path.join(nas_path, folder)
+        files = list_files(folder_path)
+
+        # Display files for selection
+        selected_file = st.selectbox(f"Select File in {folder}", files)
+
+        # Append selected file and its folder to the list
+        selected_files.append((folder_path, selected_file))
+
+    # Download selected files
+    if st.button("Download Selected Files"):
+        for folder, file in selected_files:
+            file_data = download_file(folder, file)
+            st.download_button(label=f"Download {file}", data=file_data, file_name=file)
+
+if __name__ == "__main__":
+    main()
+
