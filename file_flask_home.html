@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Downloader</title>
+</head>
+<body>
+    <h1>File Downloader</h1>
+    <form action="/download" method="post">
+        <label for="folder">Select Folder:</label>
+        <select name="folder" id="folder">
+            {% for folder in folders %}
+                <option value="{{ folder }}">{{ folder }}</option>
+            {% endfor %}
+        </select>
+        <br>
+        <label for="file">Select File:</label>
+        <select name="file" id="file" multiple>
+            {% for file in files %}
+                <option value="{{ file }}">{{ file }}</option>
+            {% endfor %}
+        </select>
+        <br>
+        <button type="submit">Download Selected File(s)</button>
+    </form>
+</body>
+</html>
