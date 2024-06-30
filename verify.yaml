@@ -1,0 +1,10 @@
+checks:
+  - name: Example Website Check 1
+    url: https://example1.com
+    expected_status: 200
+  - name: Example Website Check 2
+    url: https://example2.com
+    expected_status: 200
+  - name: Example Website Check 3
+    url: https://example3.com
+    expected_status: 200
