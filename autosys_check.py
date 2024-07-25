@@ -1,39 +1,41 @@
 import subprocess
+import re
 
-def get_autosys_job_status():
-    # Command to list all jobs and their statuses
-    command = 'autorep -J ALL'
-
-    try:
-        # Run the command and capture its output
-        output = subprocess.check_output(command, shell=True, universal_newlines=True)
+def get_job_status(job_names):
+    statuses = {}
+    for job_name in job_names:
+        try:
+            # Run the autorep command
+            result = subprocess.run(
+                ["autorep", "-j", job_name],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True
+            )
+            
+            # Parse the result
+            output = result.stdout
+            # Extract the job status (This is a simplified regex, adjust as needed)
+            status_match = re.search(r'Status\s+:\s+(\w+)', output)
+            if status_match:
+                status = status_match.group(1)
+            else:
+                status = "Unknown"
+            
+            statuses[job_name] = status
         
-        # Split the output by lines
-        lines = output.strip().split('\n')
-        
-        # Initialize a list to store job names and statuses
-        jobs = []
-
-        # Process each line (skipping headers if necessary)
-        for line in lines:
-            # Example format: job_name  status  machine
-            parts = line.split()
-            if len(parts) >= 2:
-                job_name = parts[0]
-                status = parts[1]
-                jobs.append((job_name, status))
-        
-        return jobs
+        except subprocess.CalledProcessError as e:
+            statuses[job_name] = f"Error: {e.stderr.strip()}"
     
-    except subprocess.CalledProcessError as e:
-        print(f"Error executing command: {command}")
-        print(e.output)
-        return []
+    return statuses
 
-# Example usage
-if __name__ == "__main__":
-    job_statuses = get_autosys_job_status()
-    
-    # Print job names and statuses
-    for job_name, status in job_statuses:
-        print(f"Job: {job_name}, Status: {status}")
+# List of job names you want to check
+job_names = ['JOB1', 'JOB2', 'JOB3']
+
+# Get the statuses
+status_dict = get_job_status(job_names)
+
+# Print the statuses
+for job, status in status_dict.items():
+    print(f"{job}: {status}")
