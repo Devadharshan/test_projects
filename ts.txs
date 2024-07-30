@@ -65,3 +65,36 @@ FROM
 WHERE 
     assignment_group IN ('testgroups') -- Replace 'testgroups' with actual group values
     AND sys_created_on > DATEADD(YY, -3, GETDATE())
+
+
+
+
+SELECT 
+    number_ AS 'number',
+    state_ AS 'old_state',
+    incident_state AS 'state',
+    assignment_group,
+    u_impact_severity AS 'actual_severity',
+    opened_at,
+    priority,
+    short_description,
+    reassignment_count AS 'times_reassigned',
+    closed_at,
+    sys_updated_on,
+    u_reopened_count,
+    assigned_to,
+    u_detection_method,
+    u_incident_start_date,
+    u_incident_end_date,
+    active,
+    cmdb_ci AS 'Impacted_CI',
+    close_notes,
+    description,
+    u_cause_ci AS 'Cause_CI',
+    u_change_related AS 'Is_Change_Related',
+    u_incident_causing_change_r_ AS 'Change_Reference'
+FROM 
+    viewname
+WHERE 
+    assignment_group IN ('testgroups') -- Replace 'testgroups' with actual group values
+    AND sys_created_on > DATEADD(YY, -3, GETDATE())
