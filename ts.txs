@@ -1,0 +1,33 @@
+SELECT 
+    i.number_ AS 'number',
+    i.state_ AS 'old_state',
+    i.incident_state AS 'state',
+    i.assignment_group,
+    i.u_impact_severity AS 'actual_severity',
+    i.opened_at,
+    i.priority,
+    i.short_description,
+    i.reassignment_count AS 'times_reassigned',
+    i.closed_at,
+    i.sys_updated_on,
+    i.u_reopened_count,
+    i.assigned_to,
+    i.u_detection_method,
+    i.u_incident_start_date,
+    i.u_incident_end_date,
+    i.active,
+    i.cmdb_ci AS 'Impacted_CI',
+    i.close_notes,
+    i.description,
+    p.u_cause_ci AS 'Cause_CI',
+    p.u_change_related AS 'Is_Change_Related',
+    p.u_incident_causing_change_r_ AS 'Change_Reference'
+FROM 
+    v_u_m2m_problems_incidents vu
+JOIN 
+    v_incident i ON vu.u_incident = i.number_
+JOIN 
+    v_problem p ON p.number_ = vu.u_problem
+WHERE 
+    i.assignment_group IN ('testgroups') -- Replace 'testgroups' with actual group values
+    AND i.sys_created_on > DATEADD(YY, -3, GETDATE())
