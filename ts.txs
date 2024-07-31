@@ -98,3 +98,28 @@ FROM
 WHERE 
     assignment_group IN ('testgroups') -- Replace 'testgroups' with actual group values
     AND sys_created_on > DATEADD(YY, -3, GETDATE())
+
+
+
+SELECT 
+    request,
+    catalog_task AS 'Task',
+    catalog_item_name,
+    task_state AS 'State',
+    task_assignment_group AS 'Assignment_Group',
+    task_priority AS 'Priority',
+    task_short_description AS 'Short_Description',
+    task_long_description AS 'Long_Description',
+    req_requested_for AS 'Requestor',
+    req_requested_by,
+    req_opened_at AS 'Opened_At',
+    task_sys_updated_by AS 'Updated_By',
+    task_sys_updated_on AS 'Updated_On',
+    ritm_request_type AS 'Request_Type',
+    ritm_requested_ci_name AS 'GRN',
+    ritm_requested_ci AS 'EON_ID',
+    ritm_escalated AS 'Is_Escalated'
+FROM 
+    VSN_service_request_tasks
+WHERE 
+    req_opened_at > DATEADD(yy, -3, GETDATE());
