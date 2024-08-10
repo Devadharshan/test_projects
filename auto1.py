@@ -38,3 +38,96 @@ if statuses:
         print(f"Job: {job}, Status: {status}")
 else:
     print("No jobs found or an error occurred.")
+
+
+
+
+
+
+
+
+
+import subprocess
+import re
+from datetime import datetime
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+def get_autosys_job_details(job_name):
+    try:
+        # Run the Autosys command to get the job details
+        result = subprocess.run(['autorep', '-J', job_name], capture_output=True, text=True, check=True)
+        
+        # Process the command output to find status, start date, and end date
+        status_match = re.search(r'Status:\s+(\w+)', result.stdout)
+        start_date_match = re.search(r'Start Dep:\s+([\d\/:\s]+)', result.stdout)
+        end_date_match = re.search(r'End Dep:\s+([\d\/:\s]+)', result.stdout)
+        
+        status = status_match.group(1) if status_match else "UNKNOWN"
+        start_date = start_date_match.group(1).strip() if start_date_match else None
+        end_date = end_date_match.group(1).strip() if end_date_match else None
+        
+        return status, start_date, end_date
+    except subprocess.CalledProcessError as e:
+        return "ERROR", None, None
+
+def get_jobs_by_pattern(pattern):
+    try:
+        # Run the Autosys command to list jobs based on the pattern
+        result = subprocess.run(['autorep', '-J', pattern], capture_output=True, text=True, check=True)
+        
+        # Process the command output to extract job names
+        job_names = re.findall(r'^(\S+)', result.stdout, re.MULTILINE)
+        return job_names
+    except subprocess.CalledProcessError as e:
+        return []
+
+def main(pattern, push_gateway_url):
+    job_names = get_jobs_by_pattern(pattern)
+    if not job_names:
+        print("No jobs found or error occurred.")
+        return
+
+    # Create a registry
+    registry = CollectorRegistry()
+    
+    # Define Gauges for status, start date, and end date
+    status_gauge = Gauge('autosys_job_status', 'Autosys job status', ['job_name'], registry=registry)
+    start_date_gauge = Gauge('autosys_job_start_timestamp', 'Autosys job start date as timestamp', ['job_name'], registry=registry)
+    end_date_gauge = Gauge('autosys_job_end_timestamp', 'Autosys job end date as timestamp', ['job_name'], registry=registry)
+
+    # Add job details to the gauges
+    for job_name in job_names:
+        status, start_date, end_date = get_autosys_job_details(job_name)
+        
+        # Convert dates to UNIX timestamps for Prometheus
+        start_timestamp = int(datetime.strptime(start_date, '%m/%d/%y %H:%M:%S').timestamp()) if start_date else None
+        end_timestamp = int(datetime.strptime(end_date, '%m/%d/%y %H:%M:%S').timestamp()) if end_date else None
+        
+        # Update Gauges based on job status
+        if status == 'SUCCESS':
+            status_gauge.labels(job_name=job_name).set(1)
+        elif status == 'FAILURE':
+            status_gauge.labels(job_name=job_name).set(0)
+        elif status == 'ON_ICE':
+            status_gauge.labels(job_name=job_name).set(2)
+        elif status == 'ON_HOLD':
+            status_gauge.labels(job_name=job_name).set(3)
+        elif status == 'TERMINATED':
+            status_gauge.labels(job_name=job_name).set(4)
+        else:
+            status_gauge.labels(job_name=job_name).set(-1)  # For unknown or error states
+        
+        if start_timestamp:
+            start_date_gauge.labels(job_name=job_name).set(start_timestamp)
+        if end_timestamp:
+            end_date_gauge.labels(job_name=job_name).set(end_timestamp)
+
+    # Push all the metrics to the Pushgateway under a single Prometheus job
+    push_to_gateway(push_gateway_url, job='autosys_jobs_monitor', registry=registry)
+    print("Metrics pushed to Pushgateway.")
+
+# Example usage
+job_pattern = 'YOUR_JOB_PATTERN*'
+push_gateway_url = 'http://your-pushgateway-url:9091'
+main(job_pattern, push_gateway_url)
+
