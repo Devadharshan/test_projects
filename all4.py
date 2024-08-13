@@ -173,3 +173,9 @@ def main(pattern, push_gateway_url):
     # Push all the metrics to the Pushgateway under a single Prometheus job
     push_to_gateway(push_gateway_url, job='autosys_jobs_monitor', registry=registry)
     print("Metrics pushed to Pushgateway.")
+
+
+
+job_pattern = 'YOUR_JOB_PATTERN*'
+push_gateway_url = 'http://your-pushgateway-url:9091'
+main(job_pattern, push_gateway_url)
