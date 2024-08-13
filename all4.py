@@ -185,3 +185,22 @@ main(job_pattern, push_gateway_url)
 
 start_timestamp = int(datetime.strptime(start_date, '%Y-%m-%d %H:%M:%S').timestamp()) if start_date else None
 end_timestamp = int(datetime.strptime(end_date, '%Y-%m-%d %H:%M:%S').timestamp()) if end_date else None
+
+
+
+
+import subprocess
+import re
+from datetime import datetime
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+def get_autosys_job_details(job_name):
+    try:
+        # Run the Autosys command to get the job details
+        result = subprocess.run(['autorep', '-J', job_name], capture_output=True, text=True, check=True)
+        
+        # Print result for debugging
+        print("Full Output:\n", result.stdout)  # Debugging line
+        
+        # Remove separator lines like "-----" or any other similar lines
+        filtered_output = "\n".join(line for line in result.stdout.splitlines()**⬤**
