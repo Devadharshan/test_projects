@@ -179,3 +179,9 @@ def main(pattern, push_gateway_url):
 job_pattern = 'YOUR_JOB_PATTERN*'
 push_gateway_url = 'http://your-pushgateway-url:9091'
 main(job_pattern, push_gateway_url)
+
+
+
+
+start_timestamp = int(datetime.strptime(start_date, '%Y-%m-%d %H:%M:%S').timestamp()) if start_date else None
+end_timestamp = int(datetime.strptime(end_date, '%Y-%m-%d %H:%M:%S').timestamp()) if end_date else None
