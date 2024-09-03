@@ -1,0 +1,56 @@
+import subprocess
+
+# Define the command for the first subprocess
+command1 = [
+    "path from which modules will be called",  # Ensure this path is correct
+    key,
+    "-d",
+    value,
+    "-force"
+]
+input_text1 = "select usergroups where usergroup has " + source + "\ngo\n"
+
+try:
+    # Run the first command
+    process1 = subprocess.Popen(command1, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    stdout1, stderr1 = process1.communicate(input=input_text1)
+
+    # Check for errors in the first command
+    if process1.returncode != 0:
+        print('Error: First command failed with return code', process1.returncode)
+        print('STDERR of first command:', stderr1)
+    else:
+        print("insert")
+        
+        # Process each line of output from the first command
+        for line in stdout1.splitlines():
+            # Print the insert statement
+            print("insert user " + dest + " " + line.strip() + "'")
+            
+            # Define the command for the second subprocess
+            command2 = [
+                "path from few models will be called",  # Ensure this path is correct
+                key,
+                "-d",
+                value,
+                "-force"
+            ]
+            input_text2 = "insert user " + dest + " into usergroup " + line.strip() + "'\ngo\n"
+
+            try:
+                # Run the second command
+                process2 = subprocess.Popen(command2, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                stdout2, stderr2 = process2.communicate(input=input_text2)
+
+                # Check for errors in the second command
+                if process2.returncode != 0:
+                    print('Error: Second command failed with return code', process2.returncode)
+                    print('STDERR of second command:', stderr2)
+                else:
+                    print("Output of second command:", stdout2)
+            
+            except Exception as e:
+                print('Exception occurred in second command:', str(e))
+
+except Exception as e:
+    print('Exception occurred in first command:', str(e))
