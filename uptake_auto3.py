@@ -106,3 +106,77 @@ if __name__ == "__main__":
     job_statuses = get_autosys_status(job_patterns)
     print(job_statuses)  # Output the job statuses as a dictionary
 
+
+
+
+
+
+from prometheus_client import CollectorRegistry, Gauge, generate_latest, push_to_gateway
+import subprocess
+
+# Function to get Autosys job statuses
+def get_autosys_job_status(pattern):
+    try:
+        # Run the `autorep` command to get job status based on pattern
+        result = subprocess.run(['autorep', '-J', pattern, '-s'], capture_output=True, text=True, check=True)
+        return result.stdout
+    except subprocess.CalledProcessError as e:
+        print(f"Error fetching job status: {e}")
+        return None
+
+# Function to parse job status
+def parse_job_status(output):
+    jobs = []
+    lines = output.splitlines()
+    for line in lines:
+        if line and not line.startswith('---'):
+            parts = line.split()
+            if len(parts) >= 3:
+                job_name = parts[0]
+                status = parts[2]  # Adjust based on your output format
+                jobs.append((job_name, status))
+    return jobs
+
+# Define function to push metrics to Push Gateway
+def push_metrics_to_pushgateway(jobs, gateway_url, job_name='autosys_jobs'):
+    registry = CollectorRegistry()
+
+    # Define gauges for different statuses
+    gauge_success = Gauge('auto_success', 'Jobs that succeeded', ['job_name'], registry=registry)
+    gauge_failure = Gauge('auto_failure', 'Jobs that failed', ['job_name'], registry=registry)
+    gauge_onice = Gauge('auto_onice', 'Jobs that are on ice', ['job_name'], registry=registry)
+    gauge_onhold = Gauge('auto_onhold', 'Jobs that are on hold', ['job_name'], registry=registry)
+    gauge_terminated = Gauge('auto_terminated', 'Jobs that are terminated', ['job_name'], registry=registry)
+
+    # Set metric values based on job statuses
+    for job_name, status in jobs:
+        if status == 'SU':  # Success
+            gauge_success.labels(job_name=job_name).set(1)
+        elif status == 'FA':  # Failure
+            gauge_failure.labels(job_name=job_name).set(1)
+        elif status == 'OI':  # On Ice
+            gauge_onice.labels(job_name=job_name).set(1)
+        elif status == 'OH':  # On Hold
+            gauge_onhold.labels(job_name=job_name).set(1)
+        elif status == 'TE':  # Terminated
+            gauge_terminated.labels(job_name=job_name).set(1)
+
+    # Push to Push Gateway
+    push_to_gateway(gateway_url, job=job_name, registry=registry)
+
+# Main execution
+if __name__ == '__main__':
+    # Define your job pattern and Push Gateway URL
+    job_pattern = 'ABC%'  # Replace with your pattern
+    pushgateway_url = 'localhost:9091'  # Replace with your Push Gateway URL
+
+    # Fetch job statuses
+    output = get_autosys_job_status(job_pattern)
+    if output:
+        jobs = parse_job_status(output)
+        # Push metrics to Push Gateway
+        push_metrics_to_pushgateway(jobs, pushgateway_url)
+        print("Metrics pushed successfully!")
+    else:
+        print("Failed to fetch job statuses.")
+
