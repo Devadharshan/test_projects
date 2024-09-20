@@ -269,3 +269,204 @@
   }
 }
 
+
+
+------
+
+
+{
+  "dashboard": {
+    "title": "System Monitoring - Cortex Prometheus",
+    "timezone": "browser",
+    "schemaVersion": 30,
+    "version": 1,
+    "refresh": "10s",
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "panels": [
+      {
+        "type": "graph",
+        "title": "Top 5 JVM Processes by Memory Usage",
+        "datasource": "${DS_PROMETHEUS}",  // Select your Prometheus-compatible Cortex data source while importing
+        "gridPos": {
+          "h": 9,
+          "w": 24,
+          "x": 0,
+          "y": 0
+        },
+        "targets": [
+          {
+            "expr": "topk(5, process_runtime_jvm_memory_usage_bytes)",
+            "legendFormat": "{{job}} - {{instance}}",
+            "refId": "A"
+          }
+        ],
+        "xaxis": {
+          "mode": "time",
+          "show": true
+        },
+        "yaxes": [
+          {
+            "format": "bytes",
+            "label": "Memory Usage (bytes)",
+            "show": true
+          }
+        ],
+        "lines": true,
+        "linewidth": 2,
+        "fill": 1,
+        "legend": {
+          "show": true,
+          "values": true
+        }
+      },
+      {
+        "type": "graph",
+        "title": "HTTP Response Codes - 500",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": {
+          "h": 9,
+          "w": 24,
+          "x": 0,
+          "y": 10
+        },
+        "targets": [
+          {
+            "expr": "sum(rate(http_requests_total{status_code='500'}[5m])) by (job)",
+            "legendFormat": "{{job}} - 500 Errors",
+            "refId": "B"
+          }
+        ],
+        "xaxis": {
+          "mode": "time",
+          "show": true
+        },
+        "yaxes": [
+          {
+            "format": "short",
+            "label": "Request Count",
+            "show": true
+          }
+        ],
+        "lines": true,
+        "linewidth": 2,
+        "fill": 1,
+        "legend": {
+          "show": true,
+          "values": true
+        }
+      },
+      {
+        "type": "graph",
+        "title": "HTTP Response Codes - 401",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": {
+          "h": 9,
+          "w": 24,
+          "x": 0,
+          "y": 20
+        },
+        "targets": [
+          {
+            "expr": "sum(rate(http_requests_total{status_code='401'}[5m])) by (job)",
+            "legendFormat": "{{job}} - 401 Errors",
+            "refId": "C"
+          }
+        ],
+        "xaxis": {
+          "mode": "time",
+          "show": true
+        },
+        "yaxes": [
+          {
+            "format": "short",
+            "label": "Request Count",
+            "show": true
+          }
+        ],
+        "lines": true,
+        "linewidth": 2,
+        "fill": 1,
+        "legend": {
+          "show": true,
+          "values": true
+        }
+      },
+      {
+        "type": "graph",
+        "title": "Other HTTP Response Codes",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": {
+          "h": 9,
+          "w": 24,
+          "x": 0,
+          "y": 30
+        },
+        "targets": [
+          {
+            "expr": "sum(rate(http_requests_total{status_code!='500', status_code!='401'}[5m])) by (job, status_code)",
+            "legendFormat": "{{job}} - {{status_code}}",
+            "refId": "D"
+          }
+        ],
+        "xaxis": {
+          "mode": "time",
+          "show": true
+        },
+        "yaxes": [
+          {
+            "format": "short",
+            "label": "Request Count",
+            "show": true
+          }
+        ],
+        "lines": true,
+        "linewidth": 2,
+        "fill": 1,
+        "legend": {
+          "show": true,
+          "values": true
+        }
+      },
+      {
+        "type": "graph",
+        "title": "500 Response Traces",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": {
+          "h": 9,
+          "w": 24,
+          "x": 0,
+          "y": 40
+        },
+        "targets": [
+          {
+            "expr": "sum(rate(traces_total{response_code='500'}[5m])) by (job)",
+            "legendFormat": "{{job}} - 500 Traces",
+            "refId": "E"
+          }
+        ],
+        "xaxis": {
+          "mode": "time",
+          "show": true
+        },
+        "yaxes": [
+          {
+            "format": "short",
+            "label": "Trace Count",
+            "show": true
+          }
+        ],
+        "lines": true,
+        "linewidth": 2,
+        "fill": 1,
+        "legend": {
+          "show": true,
+          "values": true
+        }
+      }
+    ]
+  }
+}
+
