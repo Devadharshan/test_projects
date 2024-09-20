@@ -215,3 +215,57 @@
     "version": 1
   }
 }
+
+
+
+-----
+
+
+{
+  "dashboard": {
+    "id": null,
+    "uid": null,
+    "title": "Test Dashboard - JVM Memory",
+    "timezone": "browser",
+    "schemaVersion": 30,
+    "version": 1,
+    "refresh": "10s",
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "panels": [
+      {
+        "type": "graph",
+        "title": "Top 5 JVM Processes by Memory Usage",
+        "datasource": "Prometheus",  // Replace with your actual data source name
+        "targets": [
+          {
+            "expr": "topk(5, process_runtime_jvm_memory_usage_bytes)",
+            "legendFormat": "{{job}} - {{instance}}",
+            "refId": "A"
+          }
+        ],
+        "xaxis": {
+          "mode": "time",
+          "show": true
+        },
+        "yaxes": [
+          {
+            "format": "bytes",
+            "label": "Memory Usage (bytes)",
+            "show": true
+          }
+        ],
+        "lines": true,
+        "linewidth": 2,
+        "fill": 1,
+        "legend": {
+          "show": true,
+          "values": true
+        }
+      }
+    ]
+  }
+}
+
