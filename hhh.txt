@@ -1,0 +1,41 @@
+To (rgb(66, 135, 245)) with shades progressing from light to dark:
+
+1. Light Blue 1: rgb(230, 243, 255)
+
+
+2. Light Blue 2: rgb(204, 232, 255)
+
+
+3. Light Blue 3: rgb(179, 220, 255)
+
+
+4. Light Blue 4: rgb(153, 209, 255)
+
+
+5. Light Blue 5: rgb(128, 198, 255)
+
+
+6. Medium Blue 1: rgb(102, 186, 255)
+
+
+7. Medium Blue 2: rgb(77, 175, 255)
+
+
+8. Medium Blue 3: rgb(66, 135, 245) (Base Color)
+
+
+9. Medium Blue 4: rgb(51, 121, 225)
+
+
+10. Dark Blue 1: rgb(38, 101, 194)
+
+
+11. Dark Blue 2: rgb(26, 81, 164)
+
+
+12. Dark Blue 3: rgb(13, 61, 133)
+
+
+
+These shades offer a gradient from very light to very dark blue, making it easy to differentiate elements in the dashboard while maintaining a consistent color theme. You can apply similar variations to any color by adjusting its RGB values.
+
