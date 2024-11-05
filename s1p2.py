@@ -128,3 +128,72 @@ push_to_gateway('your_pushgateway_address', job=args.jobname, registry=registry)
 conn.close()
 
 
+
+
+
+import argparse
+import datetime
+from collections import defaultdict
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+import pyodbc
+
+def fetch_and_process_data(cursor):
+    """
+    Fetches and processes incident data to count incidents by assignment group and month.
+    
+    Args:
+        cursor (pyodbc.Cursor): The database cursor.
+        
+    Returns:
+        dict: A dictionary with keys as (assignment_group, month) and values as counts.
+    """
+    monthly_counts = defaultdict(int)
+    for assignment_group, opened_at in cursor.fetchall():
+        opened_at_date = datetime.datetime.strptime(opened_at, '%Y-%m-%d %H:%M:%S')
+        month = opened_at_date.strftime('%Y-%m')  # Format date to 'YYYY-MM'
+        monthly_counts[(assignment_group, month)] += 1
+
+    return monthly_counts
+
+# Set up argument parser
+parser = argparse.ArgumentParser(description='Push incident counts to Push Gateway with specified job name and environment.')
+parser.add_argument('--jobname', type=str, required=True, help='Job name for Push Gateway')
+parser.add_argument('--pushgateway', type=str, required=True, help='Push Gateway URL')
+parser.add_argument('--env', type=str, required=True, choices=['prod', 'qa', 'uat'], help='Environment (prod, qa, uat)')
+args = parser.parse_args()
+
+# Determine database server based on environment
+server_mapping = {
+    'prod': 'prods',
+    'qa': 'qas',
+    'uat': 'uas'
+}
+server = server_mapping[args.env]
+
+# Connect to the Synapse Database
+conn = pyodbc.connect(f'DRIVER={{SQL Server}};SERVER={server};DATABASE=your_database;UID=your_username;PWD=your_password')
+query = """
+SELECT assignment_group, opened_at
+FROM your_view
+WHERE opened_at >= DATEADD(month, -6, GETDATE())
+"""
+cursor = conn.cursor()
+cursor.execute(query)
+
+# Process Data
+monthly_counts = fetch_and_process_data(cursor)
+
+# Push Data to Push Gateway
+registry = CollectorRegistry()
+g = Gauge('incident_count', 'Incident count per assignment group and month',
+          ['assignment_group', 'month'], registry=registry)
+
+for (assignment_group, month), count in monthly_counts.items():
+    g.labels(assignment_group=assignment_group, month=month).set(count)
+
+# Use the job name and push gateway link from command line arguments
+push_to_gateway(args.pushgateway, job=args.jobname, registry=registry)
+
+# Close connection
+conn.close()
+
