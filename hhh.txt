@@ -151,3 +151,127 @@ Orange Shades
 
 
 
+
+
+Red Shades
+
+1. Light Red 1: rgb(255, 235, 238)
+
+
+2. Light Red 2: rgb(255, 205, 210)
+
+
+3. Light Red 3: rgb(239, 154, 154)
+
+
+4. Light Red 4: rgb(229, 115, 115)
+
+
+5. Light Red 5: rgb(239, 83, 80)
+
+
+6. Medium Red 1: rgb(244, 67, 54)
+
+
+7. Medium Red 2: rgb(229, 57, 53)
+
+
+8. Medium Red 3: rgb(211, 47, 47)
+
+
+9. Dark Red 1: rgb(198, 40, 40)
+
+
+10. Dark Red 2: rgb(183, 28, 28)
+
+
+11. Dark Red 3: rgb(155, 25, 25)
+
+
+12. Dark Red 4: rgb(130, 21, 21)
+
+
+
+Teal Shades
+
+1. Light Teal 1: rgb(224, 242, 241)
+
+
+2. Light Teal 2: rgb(178, 223, 219)
+
+
+3. Light Teal 3: rgb(128, 203, 196)
+
+
+4. Light Teal 4: rgb(77, 182, 172)
+
+
+5. Light Teal 5: rgb(38, 166, 154)
+
+
+6. Medium Teal 1: rgb(0, 150, 136)
+
+
+7. Medium Teal 2: rgb(0, 137, 123)
+
+
+8. Medium Teal 3: rgb(0, 121, 107)
+
+
+9. Dark Teal 1: rgb(0, 105, 92)
+
+
+10. Dark Teal 2: rgb(0, 89, 76)
+
+
+11. Dark Teal 3: rgb(0, 77, 64)
+
+
+12. Dark Teal 4: rgb(0, 65, 54)
+
+
+
+Yellow Shades
+
+1. Light Yellow 1: rgb(255, 253, 231)
+
+
+2. Light Yellow 2: rgb(255, 249, 196)
+
+
+3. Light Yellow 3: rgb(255, 245, 157)
+
+
+4. Light Yellow 4: rgb(255, 241, 118)
+
+
+5. Light Yellow 5: rgb(255, 238, 88)
+
+
+6. Medium Yellow 1: rgb(255, 235, 59)
+
+
+7. Medium Yellow 2: rgb(253, 216, 53)
+
+
+8. Medium Yellow 3: rgb(251, 192, 45)
+
+
+9. Dark Yellow 1: rgb(249, 168, 37)
+
+
+10. Dark Yellow 2: rgb(245, 127, 23)
+
+
+11. Dark Yellow 3: rgb(239, 108, 0)
+
+
+12. Dark Yellow 4: rgb(230, 81, 0)
+
+
+
+These shades provide a good balance for gradients and offer clear distinctions for different data points, helping to create a visually appealing and organized dashboard layout.
+
+
+
+
