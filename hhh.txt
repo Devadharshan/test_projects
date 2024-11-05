@@ -39,3 +39,115 @@ To (rgb(66, 135, 245)) with shades progressing from light to dark:
 
 These shades offer a gradient from very light to very dark blue, making it easy to differentiate elements in the dashboard while maintaining a consistent color theme. You can apply similar variations to any color by adjusting its RGB values.
 
+
+
+
+C for green, purple, and orange. Each set starts from a lighter shade and moves to a darker tone, providing a range for use in a consistent dashboard theme.
+
+Green Shades
+
+1. Light Green 1: rgb(232, 245, 233)
+
+
+2. Light Green 2: rgb(200, 230, 201)
+
+
+3. Light Green 3: rgb(165, 214, 167)
+
+
+4. Light Green 4: rgb(129, 199, 132)
+
+
+5. Light Green 5: rgb(102, 187, 106)
+
+
+6. Medium Green 1: rgb(76, 175, 80)
+
+
+7. Medium Green 2: rgb(67, 160, 71)
+
+
+8. Medium Green 3: rgb(56, 142, 60)
+
+
+9. Dark Green 1: rgb(46, 125, 50)
+
+
+10. Dark Green 2: rgb(39, 108, 44)
+
+
+11. Dark Green 3: rgb(33, 94, 36)
+
+
+12. Dark Green 4: rgb(27, 77, 30)
+
+
+
+Purple Shades
+
+1. Light Purple 1: rgb(243, 229, 245)
+
+
+2. Light Purple 2: rgb(225, 190, 231)
+
+
+3. Light Purple 3: rgb(206, 147, 216)
+
+
+4. Light Purple 4: rgb(186, 104, 200)
+
+
+5. Light Purple 5: rgb(171, 71, 188)
+
+
+6. Medium Purple 1: rgb(156, 39, 176)
+
+
+7. Medium Purple 2: rgb(140, 29, 156)
+
+
+8. Medium Purple 3: rgb(123, 24, 140)
+
+
+9. Dark Purple 1: rgb(103, 17, 121)
+
+
+10. Dark Purple 2: rgb(88, 14, 103)
+
+
+11. Dark Purple 3: rgb(74, 12, 87)
+
+
+12. Dark Purple 4: rgb(62, 10, 73)
+
+
+
+Orange Shades
+
+1. Light Orange 1: rgb(255, 243, 224)
+
+
+2. Light Orange 2: rgb(255, 224, 178)
+
+
+3. Light Orange 3: rgb(255, 204, 128)
+
+
+4. Light Orange 4: rgb(255, 183, 77)
+
+
+5. Light Orange 5: rgb(255, 167, 38)
+
+
+6. Medium Orange 1: rgb(255, 152, 0)
+
+
+7. Medium Orange 2: rgb(245, 133, 0)
+
+
+8. **Medium Orange 3
+
+
+
+
+
