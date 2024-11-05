@@ -36,3 +36,33 @@ push_to_gateway('your_pushgateway_address', job=args.jobname, registry=registry)
 
 # Close connection
 conn.close()
+
+
+
+
+
+
+
+
+--------\
+
+
+
+# Process the Data to Aggregate Monthly Counts
+monthly_counts = defaultdict(int)
+for assignment_group, opened_at in cursor.fetchall():
+    opened_at_date = datetime.datetime.strptime(opened_at, '%Y-%m-%d %H:%M:%S')
+    month = opened_at_date.strftime('%Y-%m')  # Format date to 'YYYY-MM'
+    monthly_counts[(assignment_group, month)] += 1
+
+# Push Data to Push Gateway
+registry = CollectorRegistry()
+g = Gauge('incident_count', 'Incident count per assignment group and month',
+          ['assignment_group', 'month'], registry=registry)
+
+for (assignment_group, month), count in monthly_counts.items():
+    g.labels(assignment_group=assignment_group, month=month).set(count)
+
+# Use the job name from command line argument
+push_to_gateway('your_pushgateway_address', job=args.jobname, registry=registry)
+
