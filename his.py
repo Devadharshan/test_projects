@@ -82,3 +82,13 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+query = """
+    SELECT assignment_group, DATE_FORMAT(sys_created_on, '%Y-%m') as month, COUNT(*) as incident_count
+    FROM your_view_name
+    WHERE sys_created_on >= %s
+    AND incident_type = 'change'
+    GROUP BY assignment_group, month
+"""
