@@ -266,3 +266,87 @@ push_to_gateway(args.pushgateway, job=args.jobname, registry=registry)
 
 # Close connection
 conn.close()
+
+
+
+
+
+
+
+import argparse
+import datetime
+import time
+from collections import defaultdict
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+import sybpydb
+
+def fetch_and_process_data(cursor):
+    """
+    Fetches and processes incident data to count incidents by assignment group and month.
+    
+    Args:
+        cursor (sybpydb.Cursor): The database cursor.
+        
+    Returns:
+        dict: A dictionary with keys as (assignment_group, month) and values as counts.
+    """
+    monthly_counts = defaultdict(int)
+    for assignment_group, opened_at in cursor.fetchall():
+        opened_at_date = datetime.datetime.strptime(opened_at, '%Y-%m-%d %H:%M:%S')
+        month = opened_at_date.strftime('%Y-%m')  # Format date to 'YYYY-MM'
+        monthly_counts[(assignment_group, month)] += 1
+
+    return monthly_counts
+
+# Set up argument parser
+parser = argparse.ArgumentParser(description='Push incident counts to Push Gateway with specified job name and environment.')
+parser.add_argument('--jobname', type=str, required=True, help='Job name for Push Gateway')
+parser.add_argument('--pushgateway', type=str, required=True, help='Push Gateway URL')
+parser.add_argument('--env', type=str, required=True, choices=['prod', 'qa', 'uat'], help='Environment (prod, qa, uat)')
+args = parser.parse_args()
+
+# Determine server and database based on environment
+config = {
+    'prod': {'dbserver': 'prods', 'database': 'sndata'},
+    'qa': {'dbserver': 'qas', 'database': 'sndata'},
+    'uat': {'dbserver': 'uas', 'database': 'sndata'}
+}
+dbserver = config[args.env]['dbserver']
+database = config[args.env]['database']
+
+# Connect to the Sybase Database
+conn = sybpydb.connect(dsn=f"server name={dbserver}; database={database}; chainxacts=0")
+print(f"Connected to SN server: {dbserver}")
+
+# Query to retrieve data
+query = """
+SELECT assignment_group, opened_at
+FROM your_view
+WHERE opened_at >= DATEADD(month, -6, GETDATE())
+"""
+cursor = conn.cursor()
+cursor.execute(query)
+
+# Process Data
+monthly_counts = fetch_and_process_data(cursor)
+
+# Measure the time taken to push metrics
+start_time = time.time()
+
+# Push Data to Push Gateway
+registry = CollectorRegistry()
+g = Gauge('incident_count', 'Incident count per assignment group and month',
+          ['assignment_group', 'month'], registry=registry)
+
+for (assignment_group, month), count in monthly_counts.items():
+    g.labels(assignment_group=assignment_group, month=month).set(count)
+
+# Use the job name and push gateway link from command line arguments
+push_to_gateway(args.pushgateway, job=args.jobname, registry=registry)
+
+# Calculate the elapsed time
+elapsed_time = time.time() - start_time
+print(f"Metrics pushed successfully to {args.pushgateway}. Time taken: {elapsed_time:.2f} seconds.")
+
+# Close connection
+conn.close()
