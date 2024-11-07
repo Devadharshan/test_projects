@@ -1,0 +1,135 @@
+import argparse
+import time
+import sybpydb
+import logging
+from datetime import datetime
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+from prometheus_client.exposition import basic_auth_handler
+
+# Setup logger
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def fetch_incidents_from_db(server, db_name, env):
+    """Fetch incidents from the ServiceNow Synapse DB."""
+    logger.info(f"Connecting to {env} database: {db_name}...")
+    
+    # Connect to the database
+    conn = sybpydb.connect(dsn=f"server name={server}; database={db_name}; chainxacts=0")
+    cursor = conn.cursor()
+
+    # Define the SQL query to fetch incident data
+    query = """
+    SELECT incident_number, opened_at, actual_severity, assignment_group, ci_impacted
+    FROM incidents
+    WHERE opened_at >= DATEADD(month, -12, GETDATE())  -- Adjust for last 12 months
+    """
+    cursor.execute(query)
+    
+    incidents = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    
+    logger.info(f"Fetched {len(incidents)} incidents from {env} database.")
+    
+    return incidents
+
+def process_incidents(incidents):
+    """Process incidents and organize by severity and month."""
+    incident_data = {}
+
+    for incident in incidents:
+        inc_number, opened_at, severity, assignment_group, ci_impacted = incident
+
+        # Extract the month (abbreviated, like Jan, Feb, etc.)
+        month = datetime.strptime(opened_at, "%Y-%m-%d %H:%M:%S").strftime("%b")
+
+        # Create a unique key for each severity and month
+        key = f"{severity}_{month}"
+
+        # Initialize the count if it's the first time for that key
+        if key not in incident_data:
+            incident_data[key] = {
+                'count': 0,
+                'assignment_group': assignment_group,
+                'inc_number': inc_number,
+                'ci_impacted': ci_impacted
+            }
+        
+        # Increment the count of incidents for that severity and month
+        incident_data[key]['count'] += 1
+    
+    return incident_data
+
+def push_to_pushgateway(incident_data, job_name, push_gateway_url, env, username=None, password=None):
+    """Push incident data to the Push Gateway."""
+    registry = CollectorRegistry()
+    
+    for key, data in incident_data.items():
+        # Create a metric for each severity-month combination
+        severity, month = key.split("_")
+        labels = {
+            'severity': severity,
+            'month': month,
+            'assignment_group': data['assignment_group'],
+            'ci_impacted': data['ci_impacted']
+        }
+        
+        # Define the metric for incident count
+        incident_count = Gauge("incident_count", "Count of incidents by severity and month", 
+                               labelnames=['severity', 'month', 'assignment_group', 'ci_impacted'],
+                               registry=registry)
+        incident_count.labels(severity=severity, month=month, assignment_group=data['assignment_group'], ci_impacted=data['ci_impacted']).set(data['count'])
+
+    # Push to Push Gateway
+    try:
+        push_to_gateway(push_gateway_url, job=job_name, registry=registry, 
+                        basic_auth=basic_auth_handler(username, password))
+        logger.info(f"Metrics pushed successfully to {push_gateway_url} for job: {job_name}")
+    except Exception as e:
+        logger.error(f"Error pushing metrics to Push Gateway: {e}")
+
+def main():
+    """Main function to handle argument parsing and push metrics."""
+    parser = argparse.ArgumentParser(description="Process incidents and push to Push Gateway.")
+    parser.add_argument('--env', required=True, help="Environment (prod, qa, uat)")
+    parser.add_argument('--jobname', required=True, help="Job name to be used in Push Gateway")
+    parser.add_argument('--push_gateway_url', required=True, help="Push Gateway URL")
+    parser.add_argument('--username', help="Username for Push Gateway basic auth")
+    parser.add_argument('--password', help="Password for Push Gateway basic auth")
+    args = parser.parse_args()
+
+    # Server and DB settings based on environment
+    if args.env == 'prod':
+        server = 'prods'
+        db_name = 'sndata'
+    elif args.env == 'qa':
+        server = 'qas'
+        db_name = 'sndata'
+    elif args.env == 'uat':
+        server = 'uas'
+        db_name = 'sndata'
+    else:
+        logger.error("Invalid environment. Choose from 'prod', 'qa', 'uat'.")
+        return
+
+    # Fetch incidents
+    start_time = time.time()
+    incidents = fetch_incidents_from_db(server, db_name, args.env)
+    fetch_time = time.time() - start_time
+    logger.info(f"Time taken to fetch incidents: {fetch_time:.2f} seconds")
+
+    # Process incidents
+    start_time = time.time()
+    incident_data = process_incidents(incidents)
+    process_time = time.time() - start_time
+    logger.info(f"Time taken to process incidents: {process_time:.2f} seconds")
+
+    # Push data to Push Gateway
+    start_time = time.time()
+    push_to_pushgateway(incident_data, args.jobname, args.push_gateway_url, args.env, args.username, args.password)
+    push_time = time.time() - start_time
+    logger.info(f"Time taken to push metrics: {push_time:.2f} seconds")
+
+if __name__ == "__main__":
+    main()
