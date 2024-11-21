@@ -39,3 +39,62 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+-----
+
+
+import csv
+import requests
+import argparse
+
+def parse_csv(file_path, gauge_name):
+    """
+    Parse a CSV file and prepare Prometheus metrics with the specified gauge name.
+    """
+    metrics = []
+    with open(file_path, 'r') as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            # Create Prometheus metric format: gauge_name{label1="value1", label2="value2"} 1
+            labels = ",".join([f'{key}="{value}"' for key, value in row.items()])
+            metric = f'{gauge_name}{{{labels}}} 1'
+            metrics.append(metric)
+    return metrics
+
+def send_to_pushgateway(metrics, pushgateway_url, job_name):
+    """
+    Send metrics to the Prometheus Push Gateway under a single job.
+    """
+    # Combine all metrics into one payload
+    payload = "\n".join(metrics) + "\n"
+    
+    # Send the payload to the specified job in the Push Gateway
+    url = f"{pushgateway_url}/metrics/job/{job_name}"
+    response = requests.put(url, data=payload)
+    
+    # Check response status
+    if response.status_code == 202:
+        print("Metrics successfully pushed to the Push Gateway.")
+    else:
+        print(f"Failed to push metrics: {response.status_code} - {response.text}")
+
+def main():
+    # Set up argument parser
+    parser = argparse.ArgumentParser(description="Send CSV data to Prometheus Push Gateway.")
+    parser.add_argument('--csv', required=True, help="Path to the CSV file.")
+    parser.add_argument('--pushgateway', required=True, help="Prometheus Push Gateway URL.")
+    parser.add_argument('--gauge_name', required=True, help="Gauge name for the metrics.")
+    parser.add_argument('--job_name', required=True, help="Job name for the Push Gateway.")
+    
+    args = parser.parse_args()
+
+    # Parse CSV and prepare metrics
+    metrics = parse_csv(args.csv, args.gauge_name)
+    
+    # Send metrics to the Push Gateway under a single job
+    send_to_pushgateway(metrics, args.pushgateway, args.job_name)
+
+if __name__ == "__main__":
+    main()
