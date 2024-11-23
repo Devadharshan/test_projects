@@ -144,3 +144,434 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
+
+import argparse
+import datetime
+import time
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+import pysyb
+
+# Parser for command-line arguments
+parser = argparse.ArgumentParser(description="Push ServiceNow metrics to Prometheus Push Gateway.")
+parser.add_argument("--env", required=True, help="Environment (qa, uat, prod).")
+parser.add_argument("--job_name", required=True, help="Job name for Prometheus metrics.")
+parser.add_argument("--push_gateway_url", required=True, help="URL of the Prometheus Push Gateway.")
+args = parser.parse_args()
+
+# Configuration for environments
+env_config = {
+    "qa": {"server": "qas", "db": "sndata"},
+    "uat": {"server": "uas", "db": "sndb"},
+    "prod": {"server": "prods", "db": "sndata"},
+}
+
+# Get server and database based on environment
+env = args.env
+if env not in env_config:
+    raise ValueError(f"Invalid environment: {env}. Choose from qa, uat, or prod.")
+
+server = env_config[env]["server"]
+database = env_config[env]["db"]
+
+# Logger setup
+def log(message):
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {message}")
+
+# Convert seconds to a human-readable format
+def format_time_to_close(seconds):
+    """Convert seconds into a human-readable format."""
+    if seconds is None:
+        return "N/A"
+    
+    days = seconds // 86400
+    seconds %= 86400
+    hours = seconds // 3600
+    seconds %= 3600
+    minutes = seconds // 60
+    seconds %= 60
+    
+    time_parts = []
+    if days > 0:
+        time_parts.append(f"{int(days)} days")
+    if hours > 0:
+        time_parts.append(f"{int(hours)} hours")
+    if minutes > 0:
+        time_parts.append(f"{int(minutes)} minutes")
+    if seconds > 0:
+        time_parts.append(f"{int(seconds)} seconds")
+    
+    return ", ".join(time_parts)
+
+# Connect to the database
+conn = pysyb.connect(dsn=f"server name={server}; database={database};chainxacts=0")
+cursor = conn.cursor()
+
+# SQL Query to fetch data
+query = """
+SELECT
+    task_number,
+    request_number,
+    assignment_group,
+    catalog_type,
+    opened_at,
+    closed_at,
+    state,
+    assigned_to
+FROM task_view
+WHERE opened_at >= DATEADD(year, -1, GETDATE());
+"""
+log("Executing SQL query...")
+start_query_time = time.time()
+cursor.execute(query)
+rows = cursor.fetchall()
+end_query_time = time.time()
+log(f"Query executed in {end_query_time - start_query_time:.2f} seconds.")
+
+# Prepare metrics
+registry = CollectorRegistry()
+
+# Define gauges
+gauge_ticket_count = Gauge(
+    "ticket_count_by_period",
+    "Count of tickets by period",
+    ["assignment_group", "catalog_type", "period", "month"],
+    registry=registry,
+)
+
+gauge_ticket_state_count = Gauge(
+    "ticket_state_count",
+    "Count of tickets by state",
+    ["state", "assignment_group", "catalog_type", "period", "month"],
+    registry=registry,
+)
+
+gauge_ticket_status_count = Gauge(
+    "ticket_status_count",
+    "Count of tickets opened or closed",
+    ["status", "assignment_group", "catalog_type", "period", "month"],
+    registry=registry,
+)
+
+# Process data
+log("Processing data...")
+metrics = []
+for row in rows:
+    task_number, request_number, assignment_group, catalog_type, opened_at, closed_at, state, assigned_to = row
+    opened_at = datetime.datetime.strptime(opened_at, "%Y-%m-%d %H:%M:%S")
+    closed_at = datetime.datetime.strptime(closed_at, "%Y-%m-%d %H:%M:%S") if closed_at else None
+
+    # Calculate time to close
+    time_to_close_seconds = (closed_at - opened_at).total_seconds() if closed_at else None
+    time_to_close_label = format_time_to_close(time_to_close_seconds)
+
+    # Determine period and month
+    now = datetime.datetime.now()
+    month_label = opened_at.strftime("%b-%Y")
+    if now.date() == opened_at.date():
+        period = "today"
+    elif (now - opened_at).days == 1:
+        period = "yesterday"
+    elif opened_at >= now - datetime.timedelta(days=90):
+        period = "last_3_months"
+    elif opened_at >= now.replace(day=1) - datetime.timedelta(days=1):
+        period = "last_month"
+    elif opened_at >= now.replace(month=1, day=1):
+        period = "last_year"
+    else:
+        period = "other"
+
+    # Add metrics
+    metrics.append({
+        "task_number": task_number,
+        "request_number": request_number,
+        "assignment_group": assignment_group,
+        "catalog_type": catalog_type,
+        "state": state,
+        "period": period,
+        "month": month_label,
+        "time_to_close_label": time_to_close_label,
+    })
+
+# Push metrics to Prometheus
+log("Pushing metrics to Prometheus...")
+start_push_time = time.time()
+for metric in metrics:
+    # Ticket count
+    gauge_ticket_count.labels(
+        assignment_group=metric["assignment_group"],
+        catalog_type=metric["catalog_type"],
+        period=metric["period"],
+        month=metric["month"],
+    ).inc()
+
+    # Ticket state count
+    gauge_ticket_state_count.labels(
+        state=metric["state"],
+        assignment_group=metric["assignment_group"],
+        catalog_type=metric["catalog_type"],
+        period=metric["period"],
+        month=metric["month"],
+    ).inc()
+
+    # Ticket status count (opened/closed)
+    status = "opened" if metric["state"] in ["New", "In Progress"] else "closed"
+    gauge_ticket_status_count.labels(
+        status=status,
+        assignment_group=metric["assignment_group"],
+        catalog_type=metric["catalog_type"],
+        period=metric["period"],
+        month=metric["month"],
+    ).inc()
+
+push_to_gateway(args.push_gateway_url, job=args.job_name, registry=registry)
+end_push_time = time.time()
+log(f"Metrics pushed to Prometheus in {end_push_time - start_push_time:.2f} seconds.")
+
+
+
+
+------------
+
+new changges
+
+
+import argparse
+import datetime
+import time
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+import pysyb
+
+# Parser for command-line arguments
+def parse_args():
+    parser = argparse.ArgumentParser(description="Push ServiceNow metrics to Prometheus Push Gateway.")
+    parser.add_argument("--env", required=True, help="Environment (qa, uat, prod).")
+    parser.add_argument("--job_name", required=True, help="Job name for Prometheus metrics.")
+    parser.add_argument("--push_gateway_url", required=True, help="URL of the Prometheus Push Gateway.")
+    return parser.parse_args()
+
+# Configuration for environments
+env_config = {
+    "qa": {"server": "qas", "db": "sndata"},
+    "uat": {"server": "uas", "db": "sndb"},
+    "prod": {"server": "prods", "db": "sndata"},
+}
+
+# Logger setup
+def log(message, level="INFO"):
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{level}][{timestamp}] {message}")
+
+# Convert seconds to a human-readable format
+def format_time_to_close(seconds):
+    """Convert seconds into a human-readable format."""
+    if seconds is None:
+        return "N/A"
+    
+    days = seconds // 86400
+    seconds %= 86400
+    hours = seconds // 3600
+    seconds %= 3600
+    minutes = seconds // 60
+    seconds %= 60
+    
+    time_parts = []
+    if days > 0:
+        time_parts.append(f"{int(days)} days")
+    if hours > 0:
+        time_parts.append(f"{int(hours)} hours")
+    if minutes > 0:
+        time_parts.append(f"{int(minutes)} minutes")
+    if seconds > 0:
+        time_parts.append(f"{int(seconds)} seconds")
+    
+    return ", ".join(time_parts)
+
+# Connect to database and fetch data
+def fetch_task_data(server, database):
+    try:
+        log(f"Connecting to the database on server '{server}' and database '{database}'...")
+        conn = pysyb.connect(dsn=f"server name={server}; database={database};chainxacts=0")
+        cursor = conn.cursor()
+        log("Database connection established successfully.")
+
+        # SQL Query to fetch data
+        query = """
+        SELECT
+            task_number,
+            request_number,
+            assignment_group,
+            catalog_type,
+            opened_at,
+            closed_at,
+            state,
+            assigned_to
+        FROM task_view
+        WHERE opened_at >= DATEADD(year, -1, GETDATE());
+        """
+        log("Executing SQL query...")
+        start_query_time = time.time()
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        end_query_time = time.time()
+        log(f"Query executed in {end_query_time - start_query_time:.2f} seconds.")
+        log(f"Fetched {len(rows)} rows from the database.")
+        return rows, conn, cursor
+    except Exception as e:
+        log(f"Error while executing query or connecting to the database: {e}", level="ERROR")
+        raise
+
+# Prepare Prometheus metrics
+def prepare_metrics(rows):
+    log("Preparing metrics...")
+    registry = CollectorRegistry()
+
+    # Define gauges
+    gauge_ticket_count = Gauge(
+        "ticket_count_by_period",
+        "Count of tickets by period",
+        ["assignment_group", "catalog_type", "period", "month"],
+        registry=registry,
+    )
+
+    gauge_ticket_state_count = Gauge(
+        "ticket_state_count",
+        "Count of tickets by state",
+        ["state", "assignment_group", "catalog_type", "period", "month"],
+        registry=registry,
+    )
+
+    gauge_ticket_status_count = Gauge(
+        "ticket_status_count",
+        "Count of tickets opened or closed",
+        ["status", "assignment_group", "catalog_type", "period", "month"],
+        registry=registry,
+    )
+
+    metrics = []
+    for row in rows:
+        try:
+            task_number, request_number, assignment_group, catalog_type, opened_at, closed_at, state, assigned_to = row
+            opened_at = datetime.datetime.strptime(opened_at, "%Y-%m-%d %H:%M:%S")
+            closed_at = datetime.datetime.strptime(closed_at, "%Y-%m-%d %H:%M:%S") if closed_at else None
+
+            # Calculate time to close
+            time_to_close_seconds = (closed_at - opened_at).total_seconds() if closed_at else None
+            time_to_close_label = format_time_to_close(time_to_close_seconds)
+
+            # Determine period and month
+            now = datetime.datetime.now()
+            month_label = opened_at.strftime("%b-%Y")
+            if now.date() == opened_at.date():
+                period = "today"
+            elif (now - opened_at).days == 1:
+                period = "yesterday"
+            elif opened_at >= now - datetime.timedelta(days=90):
+                period = "last_3_months"
+            elif opened_at >= now.replace(day=1) - datetime.timedelta(days=1):
+                period = "last_month"
+            elif opened_at >= now.replace(month=1, day=1):
+                period = "last_year"
+            else:
+                period = "other"
+
+            # Add metrics
+            metrics.append({
+                "task_number": task_number,
+                "request_number": request_number,
+                "assignment_group": assignment_group,
+                "catalog_type": catalog_type,
+                "state": state,
+                "period": period,
+                "month": month_label,
+                "time_to_close_label": time_to_close_label,
+            })
+
+        except Exception as e:
+            log(f"Error processing row: {row} | Error: {e}", level="ERROR")
+
+    return metrics, registry
+
+# Push metrics to Prometheus Push Gateway
+def push_metrics_to_gateway(metrics, registry, push_gateway_url, job_name):
+    log("Pushing metrics to Prometheus...")
+    try:
+        start_push_time = time.time()
+        for metric in metrics:
+            # Ticket count
+            gauge_ticket_count.labels(
+                assignment_group=metric["assignment_group"],
+                catalog_type=metric["catalog_type"],
+                period=metric["period"],
+                month=metric["month"],
+            ).inc()
+
+            # Ticket state count
+            gauge_ticket_state_count.labels(
+                state=metric["state"],
+                assignment_group=metric["assignment_group"],
+                catalog_type=metric["catalog_type"],
+                period=metric["period"],
+                month=metric["month"],
+            ).inc()
+
+            # Ticket status count (opened/closed)
+            status = "opened" if metric["state"] in ["New", "In Progress"] else "closed"
+            gauge_ticket_status_count.labels(
+                status=status,
+                assignment_group=metric["assignment_group"],
+                catalog_type=metric["catalog_type"],
+                period=metric["period"],
+                month=metric["month"],
+            ).inc()
+
+        push_to_gateway(push_gateway_url, job=job_name, registry=registry)
+        end_push_time = time.time()
+        log(f"Metrics pushed to Prometheus in {end_push_time - start_push_time:.2f} seconds.")
+
+    except Exception as e:
+        log(f"Error pushing metrics to Prometheus: {e}", level="ERROR")
+        raise
+
+# Main function
+def main():
+    # Parse arguments
+    args = parse_args()
+
+    # Get server and database based on environment
+    env = args.env
+    if env not in env_config:
+        raise ValueError(f"Invalid environment: {env}. Choose from qa, uat, or prod.")
+    
+    server = env_config[env]["server"]
+    database = env_config[env]["db"]
+
+    # Fetch task data from ServiceNow
+    rows, conn, cursor = fetch_task_data(server, database)
+
+    # Prepare metrics
+    metrics, registry = prepare_metrics(rows)
+
+    # Push metrics to Prometheus Push Gateway
+    push_metrics_to_gateway(metrics, registry, args.push_gateway_url, args.job_name)
+
+    # Close connection to the database
+    if cursor:
+        cursor.close()
+        log("Database cursor closed.")
+    if conn:
+        conn.close()
+        log("Database connection closed.")
+
+if __name__ == "__main__":
+    main()
+
