@@ -1,3 +1,45 @@
+
+@app.post("/verify-skill")
+def verify_skill(payload: dict):
+    user = payload["user"]
+    application = payload["application"]
+    score = payload["score"]
+    static_answers = payload["static_answers"]
+
+    if application not in applications:
+        raise HTTPException(status_code=400, detail="Application not found")
+
+    # Get Tickets
+    app_tickets = ticket_data[ticket_data["Application"] == application]
+
+    # Construct AI Prompt
+    input_prompt = (
+        f"User rated themselves {score}/5 for {application}. "
+        f"Here are their answers:\n"
+    )
+
+    for q, ans in zip(STATIC_QUESTIONS, static_answers):
+        input_prompt += f"Q: {q}\nA: {ans}\n"
+
+    input_prompt += "\nHere are past ServiceNow issues:\n"
+    
+    # Limit to last 5 tickets to reduce token count
+    for _, row in app_tickets.head(5).iterrows():
+        input_prompt += f"- {row['Short Description']}\n"
+
+    input_prompt += "Generate 5 questions to test the user’s skill."
+
+    # **Tokenize with truncation**
+    inputs = tokenizer(input_prompt, return_tensors="pt", truncation=True, max_length=1024)
+
+    with torch.no_grad():
+        output = model.generate(**inputs, max_length=250)
+
+    questions = tokenizer.decode(output[0], skip_special_tokens=True).split("\n")
+
+    return {"ai_questions": [q for q in questions if q.strip()]}
+
+
 import streamlit as st
 import requests
 import pandas as pd
