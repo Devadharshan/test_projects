@@ -1,3 +1,95 @@
+import streamlit as st
+import requests
+import pandas as pd
+
+API_URL = "http://127.0.0.1:8000"
+
+st.sidebar.title("Navigation")
+page = st.sidebar.radio("Go to", ["Self-Assessment", "Manager View"])
+
+if page == "Self-Assessment":
+    st.title("Self-Assessment")
+
+    # Get Applications
+    try:
+        response = requests.get(f"{API_URL}/applications")
+        applications = response.json().get("applications", [])
+    except:
+        st.error("Error connecting to backend")
+        applications = []
+
+    # User Input
+    user = st.text_input("Enter Your Name")
+    selected_application = st.selectbox("Select Application", applications)
+
+    # Static Questions with Dropdown
+    try:
+        response = requests.get(f"{API_URL}/static-questions")
+        static_questions = response.json().get("questions", [])
+    except:
+        st.error("Error fetching static questions")
+        static_questions = []
+
+    static_answers = []
+    st.subheader("Static Questions (Rate 1-5)")
+    for i, question in enumerate(static_questions):
+        answer = st.selectbox(f"Q{i+1}: {question}", [1, 2, 3, 4, 5], index=2, key=f"static_{i}")
+        static_answers.append(answer)
+
+    if st.button("Submit Self-Assessment"):
+        payload = {
+            "user": user,
+            "application": selected_application,
+            "static_answers": static_answers
+        }
+        try:
+            response = requests.post(f"{API_URL}/verify-skill", json=payload)
+            questions = response.json().get("ai_questions", [])
+            st.session_state["questions"] = questions
+            st.session_state["answers"] = [""] * len(questions)  # Fixes KeyError
+        except:
+            st.error("Error processing your assessment")
+            st.session_state["questions"] = []
+            st.session_state["answers"] = []
+
+    if "questions" in st.session_state and st.session_state["questions"]:
+        st.subheader("AI-Generated Questions")
+        if "answers" not in st.session_state:
+            st.session_state["answers"] = [""] * len(st.session_state["questions"])  # Ensure answers exist
+
+        for i, question in enumerate(st.session_state["questions"]):
+            st.session_state["answers"][i] = st.text_area(f"Q{i+1}: {question}", st.session_state["answers"][i])
+
+        if st.button("Submit Responses"):
+            payload = {
+                "user": user,
+                "application": selected_application,
+                "static_answers": static_answers,
+                "ai_questions": st.session_state["questions"],
+                "ai_responses": st.session_state["answers"]
+            }
+            try:
+                response = requests.post(f"{API_URL}/submit-responses", json=payload)
+                final_score = response.json().get("final_score", "N/A")
+            except:
+                st.error("Error submitting responses")
+                final_score = "N/A"
+
+            st.success(f"Final Score: {final_score}%")
+
+elif page == "Manager View":
+    st.title("Manager View")
+
+    try:
+        response = requests.get(f"{API_URL}/manager-view")
+        assessments = response.json().get("assessments", [])
+        df = pd.DataFrame(assessments, columns=["ID", "User", "Application", "Static Answers", "AI Questions", "AI Responses", "Final Score"])
+        st.write(df)
+    except:
+        st.error("Error fetching manager data")
+
+
+----
 from fastapi import FastAPI, HTTPException
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
