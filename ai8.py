@@ -1,3 +1,218 @@
+import streamlit as st
+import requests
+
+API_BASE_URL = "http://127.0.0.1:8000"
+
+# Page Title
+st.title("Skill Verification for ServiceNow Applications")
+
+# Step 1: Get available applications
+st.subheader("Select an Application")
+
+response = requests.get(f"{API_BASE_URL}/applications")
+if response.status_code == 200:
+    applications = response.json().get("applications", [])
+    selected_application = st.selectbox("Choose an application", applications)
+else:
+    st.error("Failed to fetch applications.")
+    selected_application = None
+
+# Step 2: Static Self-Assessment
+st.subheader("Self-Assessment (Rate 1-5)")
+
+response = requests.get(f"{API_BASE_URL}/static-questions")
+if response.status_code == 200:
+    questions = response.json().get("questions", [])
+    static_answers = []
+    for q in questions:
+        static_answers.append(st.slider(q, 1, 5, 3))
+else:
+    st.error("Failed to fetch static questions.")
+
+# Step 3: Submit Self-Assessment & Get AI Questions
+if st.button("Submit Self-Assessment"):
+    if selected_application:
+        payload = {
+            "user": "test_user",  # Placeholder for user identity
+            "application": selected_application,
+            "static_answers": static_answers
+        }
+        response = requests.post(f"{API_BASE_URL}/verify-skill", json=payload)
+        if response.status_code == 200:
+            ai_questions = response.json().get("ai_questions", [])
+            st.session_state["ai_questions"] = ai_questions
+            st.success("AI has generated validation questions!")
+        else:
+            st.error("Error verifying skill.")
+    else:
+        st.warning("Please select an application first.")
+
+# Step 4: Display AI-Generated Questions
+if "ai_questions" in st.session_state:
+    st.subheader("AI-Generated Questions (Answer Below)")
+    user_responses = []
+    for q in st.session_state["ai_questions"]:
+        user_responses.append(st.text_area(q, ""))
+
+    # Step 5: Submit AI-Generated Responses
+    if st.button("Submit Responses"):
+        payload = {
+            "user": "test_user",  # Placeholder
+            "ai_responses": user_responses
+        }
+        response = requests.post(f"{API_BASE_URL}/submit-responses", json=payload)
+        if response.status_code == 200:
+            final_score = response.json().get("final_score", 0)
+            st.success(f"AI Verified Your Answers! Final Score: {final_score}%")
+        else:
+            st.error("Error submitting responses.")
+
+# Manager View (For Review)
+st.subheader("Manager View")
+if st.button("View Submissions"):
+    response = requests.get(f"{API_BASE_URL}/manager-view")
+    if response.status_code == 200:
+        submissions = response.json().get("assessments", [])
+        if submissions:
+            st.write(submissions)
+        else:
+            st.info("No submissions yet.")
+    else:
+        st.error("Failed to fetch submissions.")
+
+--
+Task Number,Application,Short Description,Close Notes,Created On
+INC001,App1,Login failure,Password reset,2023-12-15
+INC002,App2,API timeout,Increased timeout,2023-11-10
+INC003,App1,Data inconsistency,DB sync,2024-01-05
+
+
+
+---
+from fastapi import FastAPI, HTTPException
+import json
+import pandas as pd
+import random
+
+app = FastAPI()
+
+# Load application config
+with open("app_conf.json", "r") as f:
+    applications_data = json.load(f)
+applications = applications_data["Application"]
+
+# Path to the large CSV file
+CSV_FILE_PATH = "servicenow_tickets.csv"
+
+# Load tickets efficiently (read only needed columns)
+def load_tickets():
+    try:
+        df = pd.read_csv(CSV_FILE_PATH, usecols=["Task Number", "Application", "Short Description", "Close Notes", "Created On"], parse_dates=["Created On"])
+        return df
+    except Exception as e:
+        print(f"Error loading CSV: {e}")
+        return pd.DataFrame()
+
+service_now_tickets = load_tickets()
+
+# Store user responses
+user_assessments = {}
+
+@app.get("/applications")
+def get_applications():
+    return {"applications": list(applications.keys())}
+
+@app.get("/static-questions")
+def get_static_questions():
+    return {"questions": [
+        "How well do you understand this application?",
+        "How often have you worked with this application?",
+        "How confident are you in troubleshooting this application?",
+        "How well can you explain this application to others?",
+        "How well do you know this application’s architecture?"
+    ]}
+
+@app.post("/verify-skill")
+def verify_skill(data: dict):
+    user = data.get("user")
+    application = data.get("application")
+    static_answers = data.get("static_answers", [])
+
+    if not user or not application:
+        raise HTTPException(status_code=400, detail="User and application are required")
+
+    score = sum(static_answers) / len(static_answers)  # Avg Score (1-5)
+
+    # Determine question complexity
+    if score <= 2:
+        difficulty = "basic"
+    elif score == 3:
+        difficulty = "moderate"
+    else:
+        difficulty = "advanced"
+
+    # Reload CSV data in case it was updated
+    global service_now_tickets
+    service_now_tickets = load_tickets()
+
+    # Filter only relevant tickets
+    relevant_tickets = service_now_tickets[service_now_tickets["Application"].str.strip() == application]
+
+    # Filter tickets from the last 6 months (if applicable)
+    if "Created On" in relevant_tickets.columns:
+        relevant_tickets = relevant_tickets[relevant_tickets["Created On"] >= pd.Timestamp.now() - pd.DateOffset(months=6)]
+
+    # Select random 10 tickets to avoid repetition
+    relevant_tickets = relevant_tickets.sample(min(len(relevant_tickets), 10), random_state=42)
+
+    # Generate AI questions
+    ai_questions = []
+    for _, ticket in relevant_tickets.iterrows():
+        if difficulty == "basic":
+            ai_questions.append(f"What was the issue in ticket {ticket.get('Task Number', 'Unknown')}?")
+        elif difficulty == "moderate":
+            ai_questions.append(f"How was ticket {ticket.get('Task Number', 'Unknown')} resolved?")
+        else:
+            ai_questions.append(f"What was the root cause of ticket {ticket.get('Task Number', 'Unknown')}?")
+
+    # Save initial assessment
+    user_assessments[user] = {
+        "application": application,
+        "static_answers": static_answers,
+        "ai_questions": ai_questions,
+        "ai_responses": [],
+        "final_score": None
+    }
+
+    return {"ai_questions": ai_questions}
+
+@app.post("/submit-responses")
+def submit_responses(data: dict):
+    user = data.get("user")
+    ai_responses = data.get("ai_responses", [])
+
+    if user not in user_assessments:
+        raise HTTPException(status_code=400, detail="Assessment not found")
+
+    # AI verification logic (simple matching for now)
+    correct_answers = sum(1 for answer in ai_responses if answer.strip())  # Count non-empty answers
+    final_score = (correct_answers / len(ai_responses)) * 100 if ai_responses else 0
+
+    # Update user data
+    user_assessments[user]["ai_responses"] = ai_responses
+    user_assessments[user]["final_score"] = final_score
+
+    return {"final_score": final_score}
+
+@app.get("/manager-view")
+def manager_view():
+    return {"assessments": [
+        {"User": user, **data} for user, data in user_assessments.items()
+    ]}
+
+
+
+---
 @app.post("/verify-skill")
 def verify_skill(data: dict):
     user = data["user"]
