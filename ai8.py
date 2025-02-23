@@ -10,6 +10,120 @@ page = st.sidebar.radio("Go to", ["Self-Assessment", "Manager View"])
 if page == "Self-Assessment":
     st.title("Self-Assessment")
 
+    # Get Applications with 400 Error Handling
+    try:
+        response = requests.get(f"{API_URL}/applications")
+        if response.status_code == 200:
+            applications = response.json().get("applications", [])
+        else:
+            st.error(f"Error fetching applications: {response.status_code}")
+            applications = []
+    except requests.exceptions.RequestException as e:
+        st.error(f"Connection error: {e}")
+        applications = []
+
+    # User Input
+    user = st.text_input("Enter Your Name").strip()
+    selected_application = st.selectbox("Select Application", applications if applications else ["No applications found"])
+
+    # Static Questions with 400 Error Handling
+    try:
+        response = requests.get(f"{API_URL}/static-questions")
+        if response.status_code == 200:
+            static_questions = response.json().get("questions", [])
+        else:
+            st.error(f"Error fetching static questions: {response.status_code}")
+            static_questions = []
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error connecting to backend: {e}")
+        static_questions = []
+
+    static_answers = []
+    st.subheader("Static Questions (Rate 1-5)")
+    for i, question in enumerate(static_questions):
+        answer = st.selectbox(f"Q{i+1}: {question}", [1, 2, 3, 4, 5], index=2, key=f"static_{i}")
+        static_answers.append(answer)
+
+    # Submit Self-Assessment with 400 Error Handling
+    if st.button("Submit Self-Assessment"):
+        if not user:
+            st.error("Please enter your name.")
+        elif selected_application == "No applications found":
+            st.error("No applications available to select.")
+        else:
+            payload = {
+                "user": user,
+                "application": selected_application,
+                "static_answers": static_answers
+            }
+            try:
+                response = requests.post(f"{API_URL}/verify-skill", json=payload)
+                if response.status_code == 200:
+                    questions = response.json().get("ai_questions", [])
+                    st.session_state["questions"] = questions
+                    st.session_state["answers"] = [""] * len(questions)
+                else:
+                    st.error(f"Error processing assessment: {response.status_code}")
+            except requests.exceptions.RequestException as e:
+                st.error(f"Error connecting to backend: {e}")
+
+    # AI-Generated Questions Section
+    if "questions" in st.session_state and st.session_state["questions"]:
+        st.subheader("AI-Generated Questions")
+        if "answers" not in st.session_state:
+            st.session_state["answers"] = [""] * len(st.session_state["questions"])
+
+        for i, question in enumerate(st.session_state["questions"]):
+            st.session_state["answers"][i] = st.text_area(f"Q{i+1}: {question}", st.session_state["answers"][i])
+
+        # Submit AI Responses
+        if st.button("Submit Responses"):
+            payload = {
+                "user": user,
+                "application": selected_application,
+                "static_answers": static_answers,
+                "ai_questions": st.session_state["questions"],
+                "ai_responses": st.session_state["answers"]
+            }
+            try:
+                response = requests.post(f"{API_URL}/submit-responses", json=payload)
+                if response.status_code == 200:
+                    final_score = response.json().get("final_score", "N/A")
+                    st.success(f"Final Score: {final_score}%")
+                else:
+                    st.error(f"Error submitting responses: {response.status_code}")
+            except requests.exceptions.RequestException as e:
+                st.error(f"Error connecting to backend: {e}")
+
+elif page == "Manager View":
+    st.title("Manager View")
+
+    try:
+        response = requests.get(f"{API_URL}/manager-view")
+        if response.status_code == 200:
+            assessments = response.json().get("assessments", [])
+            df = pd.DataFrame(assessments, columns=["ID", "User", "Application", "Static Answers", "AI Questions", "AI Responses", "Final Score"])
+            st.write(df)
+        else:
+            st.error(f"Error fetching manager data: {response.status_code}")
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error connecting to backend: {e}")
+
+
+
+----
+import streamlit as st
+import requests
+import pandas as pd
+
+API_URL = "http://127.0.0.1:8000"
+
+st.sidebar.title("Navigation")
+page = st.sidebar.radio("Go to", ["Self-Assessment", "Manager View"])
+
+if page == "Self-Assessment":
+    st.title("Self-Assessment")
+
     # Get Applications
     try:
         response = requests.get(f"{API_URL}/applications")
