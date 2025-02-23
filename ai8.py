@@ -1,4 +1,38 @@
-import streamlit as st
+@app.post("/verify-skill")
+def verify_skill(data: dict):
+    user = data["user"]
+    application = data["application"]
+    static_answers = data["static_answers"]
+    score = data["score"]
+
+    # Determine question complexity based on score
+    if score <= 2:
+        difficulty = "basic"
+    elif score == 3:
+        difficulty = "moderate"
+    else:
+        difficulty = "advanced"
+
+    # Fetch past tickets for the selected application
+    relevant_tickets = []
+    for ticket in service_now_tickets:  # Assuming this is a preloaded list of tickets
+        if ticket["Application"] == application:
+            relevant_tickets.append(ticket)
+
+    # Generate AI questions based on ticket history and difficulty level
+    ai_questions = []
+    for ticket in relevant_tickets[:5]:  # Limit to 5 relevant tickets
+        if difficulty == "basic":
+            ai_questions.append(f"What is the main issue reported in ticket {ticket['Task Number']}?")
+        elif difficulty == "moderate":
+            ai_questions.append(f"How was ticket {ticket['Task Number']} resolved?")
+        else:
+            ai_questions.append(f"What root cause was identified for ticket {ticket['Task Number']}?")
+
+    return {"ai_questions": ai_questions}
+
+
+---import streamlit as st
 import requests
 import pandas as pd
 
