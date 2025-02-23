@@ -444,3 +444,31 @@ elif page == "Manager View":
     except (requests.exceptions.RequestException, ValueError):
         st.error("Error fetching manager data")
 
+
+
+
+import sqlite3
+
+# Connect to the SQLite database
+db_path = "database.db"  # Update with your DB file path
+conn = sqlite3.connect(db_path)
+cursor = conn.cursor()
+
+# List all tables
+cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+tables = cursor.fetchall()
+print("Tables:", tables)
+
+# Fetch all data from a table (update with your table name)
+table_name = "responses"  # Change this to the table you want to inspect
+cursor.execute(f"SELECT * FROM {table_name};")
+rows = cursor.fetchall()
+
+# Print results
+for row in rows:
+    print(row)
+
+# Close the connection
+conn.close()
+
+
