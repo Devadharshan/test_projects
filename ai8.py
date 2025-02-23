@@ -1,3 +1,127 @@
+import streamlit as st
+import requests
+import pandas as pd
+
+API_URL = "http://127.0.0.1:8000"
+
+st.sidebar.title("Navigation")
+page = st.sidebar.radio("Go to", ["Self-Assessment", "Manager View"])
+
+if page == "Self-Assessment":
+    st.title("Self-Assessment")
+
+    # Get Applications
+    try:
+        response = requests.get(f"{API_URL}/applications")
+        if response.status_code == 200:
+            applications = response.json().get("applications", [])
+        else:
+            st.error(f"Error fetching applications: {response.text}")
+            applications = []
+    except (requests.exceptions.RequestException, ValueError):
+        st.error("Error connecting to backend")
+        applications = []
+
+    # User Input
+    user = st.text_input("Enter Your Name")
+    selected_application = st.selectbox("Select Application", applications)
+
+    # Static Questions with Dropdown
+    try:
+        response = requests.get(f"{API_URL}/static-questions")
+        if response.status_code == 200:
+            static_questions = response.json().get("questions", [])
+        else:
+            st.error(f"Error fetching static questions: {response.text}")
+            static_questions = []
+    except (requests.exceptions.RequestException, ValueError):
+        st.error("Error fetching static questions")
+        static_questions = []
+
+    static_answers = []
+    st.subheader("Static Questions (Rate 1-5)")
+    for i, question in enumerate(static_questions):
+        answer = st.selectbox(f"Q{i+1}: {question}", [1, 2, 3, 4, 5], index=2, key=f"static_{i}")
+        static_answers.append(answer)
+
+    if st.button("Submit Self-Assessment"):
+        if not user or not selected_application:
+            st.error("Please enter your name and select an application.")
+        else:
+            score = sum(static_answers) / len(static_answers)  # Average Score
+
+            payload = {
+                "user": user,
+                "application": selected_application,
+                "score": score,
+                "static_answers": static_answers
+            }
+
+            try:
+                response = requests.post(f"{API_URL}/verify-skill", json=payload)
+                if response.status_code == 200:
+                    response_data = response.json()
+                    questions = response_data.get("ai_questions", [])
+                else:
+                    st.error(f"Error processing assessment: {response.text}")
+                    questions = []
+            except (requests.exceptions.RequestException, ValueError):
+                st.error("Error processing your assessment")
+                questions = []
+
+            st.session_state["questions"] = questions
+            st.session_state["answers"] = [""] * len(questions)
+
+    if "questions" in st.session_state:
+        st.subheader("AI-Generated Questions")
+        for i, question in enumerate(st.session_state["questions"]):
+            st.session_state["answers"][i] = st.text_area(f"Q{i+1}: {question}", st.session_state["answers"][i])
+
+        if st.button("Submit Responses"):
+            if not st.session_state["answers"]:
+                st.error("Please answer all questions before submitting.")
+            else:
+                payload = {
+                    "user": user,
+                    "application": selected_application,
+                    "static_answers": static_answers,
+                    "ai_questions": st.session_state["questions"],
+                    "ai_responses": st.session_state["answers"]
+                }
+                try:
+                    response = requests.post(f"{API_URL}/submit-responses", json=payload)
+                    if response.status_code == 200:
+                        response_data = response.json()
+                        final_score = response_data.get("final_score", "N/A")
+                        ai_responses = response_data.get("responses", [])
+                    else:
+                        st.error(f"Error submitting responses: {response.text}")
+                        final_score = "N/A"
+                        ai_responses = []
+                except (requests.exceptions.RequestException, ValueError, KeyError, TypeError):
+                    st.error("Error submitting responses")
+                    final_score = "N/A"
+                    ai_responses = []
+
+                st.success(f"Final Score: {final_score}%")
+
+elif page == "Manager View":
+    st.title("Manager View")
+
+    try:
+        response = requests.get(f"{API_URL}/manager-view")
+        if response.status_code == 200:
+            assessments = response.json().get("assessments", [])
+            df = pd.DataFrame(assessments, columns=["ID", "User", "Application", "Static Answers", "AI Questions", "AI Responses", "Final Score"])
+            st.write(df)
+        else:
+            st.error(f"Error fetching manager data: {response.text}")
+    except (requests.exceptions.RequestException, ValueError):
+        st.error("Error fetching manager data")
+
+
+
+p-----
 if st.button("Submit Self-Assessment"):
     payload = {
         "user": user,
