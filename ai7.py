@@ -258,3 +258,95 @@ elif page == "Manager View":
     assessments = response.json()["assessments"]
 
     st.write(pd.DataFrame(assessments, columns=["ID", "User", "Application", "Score", "Static Answers", "AI Questions", "AI Responses", "Final Score"]))
+
+
+
+
+
+
+import streamlit as st
+import requests
+import pandas as pd
+
+API_URL = "http://127.0.0.1:8000"
+
+# Navigation
+st.sidebar.title("Navigation")
+page = st.sidebar.radio("Go to", ["Self-Assessment", "Manager View"])
+
+if page == "Self-Assessment":
+    st.title("Self-Assessment")
+
+    # Get Applications
+    try:
+        response = requests.get(f"{API_URL}/applications")
+        applications = response.json().get("applications", [])
+    except requests.exceptions.RequestException:
+        st.error("Error connecting to backend")
+        applications = []
+
+    # User Input
+    user = st.text_input("Enter Your Name")
+    selected_application = st.selectbox("Select Application", applications)
+
+    # Static Questions with Dropdown
+    try:
+        response = requests.get(f"{API_URL}/static-questions")
+        static_questions = response.json().get("questions", [])
+    except requests.exceptions.RequestException:
+        st.error("Error fetching static questions")
+        static_questions = []
+
+    static_answers = []
+    st.subheader("Static Questions (Rate 1-5)")
+    for i, question in enumerate(static_questions):
+        answer = st.selectbox(f"Q{i+1}: {question}", [1, 2, 3, 4, 5], index=2, key=f"static_{i}")
+        static_answers.append(answer)
+
+    if st.button("Submit Self-Assessment"):
+        payload = {
+            "user": user,
+            "application": selected_application,
+            "static_answers": static_answers
+        }
+        try:
+            response = requests.post(f"{API_URL}/verify-skill", json=payload)
+            data = response.json()
+            questions = data.get("ai_questions", [])
+        except requests.exceptions.RequestException:
+            st.error("Error processing your assessment")
+            questions = []
+
+        st.session_state["questions"] = questions
+        st.session_state["answers"] = [""] * len(questions)
+
+    if "questions" in st.session_state:
+        st.subheader("AI-Generated Questions")
+        for i, question in enumerate(st.session_state["questions"]):
+            st.session_state["answers"][i] = st.text_area(f"Q{i+1}: {question}", st.session_state["answers"][i])
+
+        if st.button("Submit Responses"):
+            payload = {
+                "user": user,
+                "application": selected_application,
+                "static_answers": static_answers,
+                "ai_questions": st.session_state["questions"],
+                "ai_responses": st.session_state["answers"]
+            }
+            try:
+                response = requests.post(f"{API_URL}/submit-responses", json=payload)
+                final_score = response.json().get("final_score", "N/A")
+                st.success(f"Final Score: {final_score}%")
+            except requests.exceptions.RequestException:
+                st.error("Error submitting responses")
+
+elif page == "Manager View":
+    st.title("Manager View")
+
+    try:
+        response = requests.get(f"{API_URL}/manager-view")
+        assessments = response.json().get("assessments", [])
+        st.write(pd.DataFrame(assessments, columns=["ID", "User", "Application", "Static Answers", "AI Questions", "AI Responses", "Final Score"]))
+    except requests.exceptions.RequestException:
+        st.error("Error fetching manager data")
+
