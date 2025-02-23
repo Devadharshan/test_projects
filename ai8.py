@@ -1,4 +1,60 @@
+if st.button("Submit Self-Assessment"):
+    payload = {
+        "user": user,
+        "application": selected_application,
+        "score": sum(static_answers) / len(static_answers),  # Calculate average score
+        "static_answers": static_answers
+    }
 
+----
+@app.post("/verify-skill")
+def verify_skill(payload: dict):
+    user = payload.get("user", "")
+    application = payload.get("application", "")
+    score = payload.get("score", None)  # Use .get() to avoid KeyError
+    static_answers = payload.get("static_answers", [])
+
+    if not user or not application:
+        raise HTTPException(status_code=400, detail="User or application missing")
+    
+    if application not in applications:
+        raise HTTPException(status_code=400, detail="Application not found")
+
+    if score is None:
+        raise HTTPException(status_code=400, detail="Score missing in request")
+
+    # Get Tickets for the selected application
+    app_tickets = ticket_data[ticket_data["Application"] == application]
+
+    # Construct AI Prompt
+    input_prompt = (
+        f"User rated themselves {score}/5 for {application}. "
+        f"Here are their answers:\n"
+    )
+
+    for q, ans in zip(STATIC_QUESTIONS, static_answers):
+        input_prompt += f"Q: {q}\nA: {ans}\n"
+
+    input_prompt += "\nHere are past ServiceNow issues:\n"
+    
+    # Limit ticket history to avoid exceeding model input limits
+    for _, row in app_tickets.head(5).iterrows():
+        input_prompt += f"- {row['Short Description']}\n"
+
+    input_prompt += "Generate 5 questions to test the user’s skill."
+
+    # **Tokenize with truncation**
+    inputs = tokenizer(input_prompt, return_tensors="pt", truncation=True, max_length=1024)
+
+    with torch.no_grad():
+        output = model.generate(**inputs, max_length=250)
+
+    questions = tokenizer.decode(output[0], skip_special_tokens=True).split("\n")
+
+    return {"ai_questions": [q for q in questions if q.strip()]}
+
+
+----
 @app.post("/verify-skill")
 def verify_skill(payload: dict):
     user = payload["user"]
