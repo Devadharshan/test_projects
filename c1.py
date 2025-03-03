@@ -25,8 +25,36 @@ Analyze the following ticket details:
 - **Message to User:** {sample_ticket['message to user']}
 - **Resolution Notes:** {sample_ticket['close notes']}
 
-The question should assess the engineer’s ability to troubleshoot and resolve similar issues.
-"""
+The question should assess the engineer’s ability to troubleshoot and resolve similar import torch
+from transformers import LlamaForCausalLM, LlamaTokenizer
+
+MODEL_PATH = r"C:\path\to\llama-2-7b"  # Update with your actual model path
+
+# Load tokenizer
+tokenizer = LlamaTokenizer.from_pretrained(MODEL_PATH)
+
+# Initialize model architecture
+model = LlamaForCausalLM.from_pretrained(
+    MODEL_PATH,
+    torch_dtype=torch.float32,  # Use float32 for CPU
+    device_map="cpu"  # Ensure it runs on CPU
+)
+
+# Load checkpoint (state_dict)
+checkpoint = torch.load(f"{MODEL_PATH}\\consolidated.00.pth", map_location="cpu")
+
+# Apply checkpoint weights
+model.load_state_dict(checkpoint, strict=False)
+
+print("✅ Model loaded successfully on Windows!")
+
+
+
+
+
+
+
+
 
 
 
