@@ -27,6 +27,109 @@
 
 
 
+import io
+import json
+import logging
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+import requests
+from typing import Optional
+
+app = FastAPI()
+
+# Initialize logging
+logging.basicConfig(
+    filename='backend.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Load service configuration
+try:
+    with open('config.json') as config_file:
+        config = json.load(config_file)
+        logger.info("Service configuration loaded successfully.")
+except Exception as e:
+    logger.error(f"Failed to load service configuration: {e}")
+    config = {}
+
+# Pydantic model for code analysis request
+class CodeAnalysisRequest(BaseModel):
+    service_name: str
+    prompt: str
+
+# Endpoint to upload and analyze Hprof file
+@app.post("/upload_hprof/")
+async def upload_hprof(file: UploadFile = File(...)):
+    try:
+        content = await file.read()
+        logger.info(f"Received Hprof file: {file.filename}")
+        analysis_result = analyze_hprof(content)
+        return JSONResponse(content={"analysis_result": analysis_result}, status_code=200)
+    except Exception as e:
+        logger.error(f"Error processing Hprof file: {e}")
+        raise HTTPException(status_code=500, detail="Failed to process Hprof file.")
+
+# Endpoint to analyze code based on service name and prompt
+@app.post("/analyze_code/")
+async def analyze_code(request: CodeAnalysisRequest):
+    try:
+        service_info = config.get("services", {}).get(request.service_name)
+        if not service_info:
+            logger.warning(f"Service '{request.service_name}' not found in configuration.")
+            raise HTTPException(status_code=404, detail="Service not found.")
+
+        repo_url = service_info.get("repo_url")
+        auth_type = service_info.get("auth_type")
+        headers = config.get("default_headers", {})
+
+        if auth_type == "token":
+            token = service_info.get("token")
+            headers["Authorization"] = f"Bearer {token}"
+        elif auth_type == "basic":
+            username = service_info.get("username")
+            password = service_info.get("password")
+            auth = (username, password)
+        else:
+            auth = None
+
+        logger.info(f"Fetching code from repository: {repo_url}")
+        response = requests.get(repo_url, headers=headers, auth=auth)
+        if response.status_code != 200:
+            logger.error(f"Failed to fetch code from repository: {response.status_code}")
+            raise HTTPException(status_code=500, detail="Failed to fetch code from repository.")
+
+        code_content = response.text
+        analysis_result = analyze_code_with_prompt(code_content, request.prompt)
+        return JSONResponse(content={"analysis": analysis_result}, status_code=200)
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error during code analysis: {e}")
+        raise HTTPException(status_code=500, detail="Code analysis failed.")
+
+# Health check endpoint
+@app.get("/")
+async def read_root():
+    return {"status": "Backend is running."}
+
+# Placeholder function to analyze Hprof content
+def analyze_hprof(content: bytes) -> str:
+    # Implement your Hprof analysis logic here
+    logger.debug("Analyzing Hprof content.")
+    return "Hprof analysis result."
+
+# Placeholder function to analyze code with a given prompt
+def analyze_code_with_prompt(code: str, prompt: str) -> str:
+    # Implement your code analysis logic here
+    logger.debug("Analyzing code with prompt.")
+    return f"Analysis based on prompt '{prompt}': Code analysis result."
+
+
+
+
 pip install fastapi uvicorn pydantic torch requests python-json-logger
 
 pip install torch sentencepiece
