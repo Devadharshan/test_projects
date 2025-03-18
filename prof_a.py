@@ -1,3 +1,241 @@
+pip install fastapi uvicorn llama-cpp-python
+
+uvicorn app:app --reload
+-----
+
+Frontend Setup
+1. Initialize Next.js Project:
+
+Navigate to the frontend directory and initialize a new Next.js project:
+
+npx create-next-app@latest .
+2. Install Dependencies:
+
+Install necessary packages, including three for Three.js and @react-three/fiber for React Three Fiber:
+
+npm install three @react-three/fiber @react-three/drei
+3. next.config.js:
+
+Configure Next.js to allow loading of .glb files:
+
+module.exports = {
+  webpack(config) {
+    config.module.rules.push({
+      test: /\.glb$/,
+      use: {
+        loader: 'file-loader',
+      },
+    });
+    return config;
+  },
+};
+4. components/FileUpload.js:
+
+Component for file upload with animation.
+
+import { useState } from 'react';
+import { Canvas } from '@react-three/fiber';
+import { OrbitControls, useGLTF } from '@react-three/drei';
+
+function UploadAnimation() {
+  const { scene } = useGLTF('/models/upload_animation.glb');
+  return <primitive object={scene} />;
+}
+
+export default function FileUpload({ onUpload }) {
+  const [file, setFile] = useState(null);
+
+  const handleFileChange = (e) => {
+    setFile(e.target.files[0]);
+  };
+
+  const handleUpload = () => {
+    if (file) {
+      onUpload(file);
+    }
+  };
+
+  return (
+    <div>
+      <input type="file" onChange={handleFileChange} />
+      <button onClick={handleUpload}>Upload</button>
+      <Canvas>
+        <ambientLight />
+        <OrbitControls />
+        <UploadAnimation />
+      </Canvas>
+    </div>
+  );
+}
+5. components/PromptInput.js:
+
+Component for prompt input.
+
+import { useState } from 'react';
+
+export default function PromptInput({ onSubmit }) {
+  const [prompt, setPrompt] = useState('');
+
+  const handleSubmit = () => {
+    onSubmit(prompt);
+  };
+
+  return (
+    <div>
+      <textarea
+        value={prompt}
+        onChange={(e) => setPrompt(e.target.value)}
+        placeholder="Enter your prompt here..."
+      />
+      <button onClick={handleSubmit}>Submit</button>
+    </div>
+  );
+}
+6. components/ServiceSelector.js:
+
+Component to select a microservice.
+
+import { useState, useEffect } from 'react';
+
+export default function ServiceSelector({ onSelect }) {
+  const [services, setServices] = useState([]);
+
+  useEffect(() => {
+    fetch('/api/services')
+      .then((res) => res.json())
+      .then((data) => setServices(data.services));
+  }, []);
+
+  return (
+    <div>
+      <select onChange
+::contentReference[oaicite:0]{index=0}
+ 
+------
+  
+
+app.py
+from fastapi import FastAPI, UploadFile, Form, HTTPException
+from fastapi.responses import JSONResponse
+import logging
+import json
+from io import BytesIO
+from pyhprof.parser import HprofParser
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Load microservices configuration
+with open('microservices_config.json', 'r') as f:
+    microservices_config = json.load(f)
+
+# Initialize FastAPI app
+app = FastAPI()
+
+class AnalysisRequest(BaseModel):
+    service_name: str
+    prompt: str
+
+@app.post("/analyze/")
+async def analyze(service_name: str = Form(...), prompt: str = Form(...), hprof_file: UploadFile = None):
+    logger.info(f"Received analysis request for service: {service_name}")
+
+    # Validate service name
+    if service_name not in microservices_config:
+        logger.error(f"Service {service_name} not found in configuration.")
+        raise HTTPException(status_code=404, detail="Service not found")
+
+    # Process Hprof file if provided
+    if hprof_file:
+        logger.info(f"Processing Hprof file: {hprof_file.filename}")
+        hprof_content = await hprof_file.read()
+        hprof_analysis = analyze_hprof(hprof_content)
+    else:
+        hprof_analysis = "No Hprof file provided."
+
+    # Generate AI response
+    ai_response = generate_ai_response(prompt, hprof_analysis)
+
+    return JSONResponse(content={"analysis": ai_response})
+
+def analyze_hprof(hprof_content: bytes) -> str:
+    try:
+        # Parse Hprof content from bytes
+        hprof_stream = BytesIO(hprof_content)
+        parser = HprofParser(hprof_stream)
+        heap = parser.parse()
+
+        # Example: Analyze heap data (customize as needed)
+        num_classes = len(heap.classes)
+        num_instances = sum(len(cls.instances) for cls in heap.classes.values())
+
+        analysis_result = f"Classes Found: {num_classes}, Instances Found: {num_instances}"
+
+        # Additional analysis can be added here
+
+        return analysis_result
+
+    except Exception as e:
+        logger.error(f"Error parsing Hprof file: {str(e)}")
+        return "Error analyzing Hprof file."
+
+def generate_ai_response(prompt: str, hprof_analysis: str) -> str:
+    # Combine prompt and Hprof analysis
+    combined_input = f"{prompt}\n\nHprof Analysis:\n{hprof_analysis}"
+    # Placeholder for AI model integration
+    # Replace this with actual AI model inference code
+    response = f"AI Response based on input: {combined_input}"
+    return response
+
+
+
+------
+
+project-root/
+│
+├── backend/
+│   ├── app.py
+│   └── microservices_config.json
+│
+└── frontend/
+    ├── public/
+    │   └── models/
+    │       └── upload_animation.glb
+    ├── pages/
+    │   ├── _app.js
+    │   ├── index.js
+    │   └── api/
+    │       └── analyze.js
+    ├── components/
+    │   ├── FileUpload.js
+    │   ├── PromptInput.js
+    │   └── ServiceSelector.js
+    ├── styles/
+    │   └── globals.css
+    ├── next.config.js
+    └── package.json
+
+
+
+
+  ---
+
+
+  Backend Setup
+1. microservices_config.json:
+
+
+{
+    "serviceA": "https://github.com/your-org/serviceA-repo",
+    "serviceB": "https://github.com/your-org/serviceB-repo"
+}
+
+
+----
+
+
+
 {
   "services": {
     "Service-Aa": {
