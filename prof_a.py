@@ -1,3 +1,32 @@
+{
+  "services": {
+    "Service-Aa": {
+      "repo_url": "https://stash.company.com/projects/PROJ/repos/service-aa",
+      "requires_token": true,
+      "auth_type": "token",
+      "token": "YOUR_TOKEN_HERE"
+    },
+    "Service-Ab": {
+      "repo_url": "https://stash.company.com/projects/PROJ/repos/service-ab",
+      "requires_token": false,
+      "auth_type": "basic",
+      "username": "user",
+      "password": "pass"
+    },
+    "Service-Ac": {
+      "repo_url": "https://stash.company.com/projects/PROJ/repos/service-ac",
+      "requires_token": true,
+      "auth_type": "token",
+      "token": "ANOTHER_TOKEN"
+    }
+  },
+  "default_headers": {
+    "Accept": "application/json"
+  }
+}
+
+
+
 pip install fastapi uvicorn pydantic torch requests python-json-logger
 
 pip install torch sentencepiece
