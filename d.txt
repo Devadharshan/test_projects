@@ -1,0 +1,7 @@
+javac -cp .:path/to/jackson-core.jar:path/to/jackson-databind.jar:path/to/jackson-annotations.jar HprofAnalyzer.java -cp .:path/to/jackson-core.jar:path/to/jackson-databind.jar:path/to/jackson-annotations.jar HprofAnalyzer input.hprof output.json
+
+
+
+
+
+
