@@ -1,0 +1,44 @@
+hprof-ai-analyzer/
+├── backend/                            # Python FastAPI Backend
+│   ├── app.py                          # Single Python script (FastAPI backend)
+│   ├── conf.json                       # JSON config mapping microservices to repo URLs
+│   ├── open_llama_model/               # Local AI model files
+│   │   ├── checklist.chk
+│   │   ├── consolidated.00.pth
+│   │   ├── LICENSE.txt
+│   │   ├── params.json
+│   │   ├── README.md
+│   │   ├── Responsible-use-Guide.pdf
+│   │   ├── tokenizer.model
+│   │   ├── tokenizer_checklist.chk
+│   │   └── USE_POLICY.md
+│   └── logs/                           # Folder to store backend logs
+│       └── app.log
+│
+├── frontend/                           # Next.js + Three.js Frontend
+│   ├── package.json
+│   ├── next.config.js
+│   ├── public/
+│   │   └── (static assets, logo, etc.)
+│   ├── pages/
+│   │   └── index.js                    # Main frontend page
+│   └── components/
+│       └── Animation.js                # Three.js animations (upload, AI analysis, etc.)
+│
+├── java-hprof-analyzer/                # Java Hprof Analyzer
+│   ├── lib/                            # All required JAR files from Eclipse MAT
+│   │   ├── org.eclipse.mat.api_xxx.jar
+│   │   ├── mat.hprof_xxx.jar
+│   │   ├── mat.parser_xxx.jar
+│   │   └── (others as needed)
+│   ├── src/
+│   │   └── com/
+│   │       └── example/
+│   │           └── analyzer/
+│   │               └── HprofAnalyzer.java
+│   ├── dumps/                          # Optional: test Hprof files
+│   ├── build/                          # Auto-generated compiled Java classes
+│   └── run.sh                          # Optional shell script to compile & run analyzer
+│
+├── README.md                           # Documentation and setup instructions
+└── requirements.txt                    # Python dependencies (FastAPI, logging, etc.)
