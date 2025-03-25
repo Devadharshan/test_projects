@@ -1,0 +1,11 @@
+frontend/
+│── components/
+│   ├── ServiceSelector.js
+│   ├── ThreeJSAnimation.js
+│── pages/
+│   ├── index.js
+│── public/
+│   ├── services.json
+│── next.config.js
+│── package.json
+│── styles/ (if required)
