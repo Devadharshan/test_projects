@@ -1,0 +1,7 @@
+{
+  "services": [
+    { "name": "ServiceA" },
+    { "name": "ServiceB" },
+    { "name": "ServiceC" }
+  ]
+}
