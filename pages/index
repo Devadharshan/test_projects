@@ -1,0 +1,85 @@
+import { useState } from "react";
+import ThreeJSAnimation from "../components/ThreeJSAnimation";
+import ServiceSelector from "../components/ServiceSelector";
+
+export default function Home() {
+  const [selectedService, setSelectedService] = useState("");
+  const [file, setFile] = useState(null);
+  const [prompt, setPrompt] = useState("");
+  const [analysisResult, setAnalysisResult] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const handleFileChange = (event) => {
+    setFile(event.target.files[0]);
+  };
+
+  const handlePromptChange = (event) => {
+    setPrompt(event.target.value);
+  };
+
+  const handleServiceChange = (service) => {
+    setSelectedService(service);
+  };
+
+  const handleSubmit = async () => {
+    if (!file || !prompt || !selectedService) {
+      alert("Please upload an Hprof file, enter a prompt, and select a service.");
+      return;
+    }
+
+    setLoading(true);
+
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("prompt", prompt);
+    formData.append("service", selectedService);
+
+    try {
+      const response = await fetch("http://localhost:8000/analyze", {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await response.json();
+      setAnalysisResult(data.result);
+    } catch (error) {
+      console.error("Error analyzing Hprof file:", error);
+      setAnalysisResult("Error during analysis.");
+    }
+
+    setLoading(false);
+  };
+
+  return (
+    <div className="container">
+      <h1>Hprof Analysis Tool</h1>
+
+      <ServiceSelector onSelect={handleServiceChange} />
+      
+      <input type="file" onChange={handleFileChange} accept=".hprof" />
+      <input type="text" placeholder="Enter your prompt" onChange={handlePromptChange} />
+
+      <button onClick={handleSubmit} disabled={loading}>
+        {loading ? "Analyzing..." : "Analyze"}
+      </button>
+
+      <ThreeJSAnimation trigger={loading} />
+
+      <div className="result">
+        <h2>Analysis Result:</h2>
+        <p>{analysisResult}</p>
+      </div>
+
+      <style jsx>{`
+        .container {
+          text-align: center;
+          padding: 20px;
+        }
+        input, button {
+          display: block;
+          margin: 10px auto;
+        }
+      `}</style>
+    </div>
+  );
+}
