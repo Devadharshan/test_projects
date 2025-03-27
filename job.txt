@@ -1,0 +1,4 @@
+job-analytics-backend/
+│── main.py                    # FastAPI backend
+│── job_parser.py               # Runs autorep command
+│── requirements.txt            # Dependencies
