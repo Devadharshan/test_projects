@@ -69,12 +69,13 @@ def main():
     for file in files:
         process_file(file)
 
-    logging.info("📤 Pushing metrics to PushGateway...")
+    logging.info(" Pushing metrics to PushGateway...")
     try:
         push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
-        logging.info("✅ All metrics pushed successfully.")
+        logging.info("All metrics pushed successfully.")
     except Exception as e:
-        logging.error(f"❌ Failed to push metrics: {e}")
+        logging.error(f" Failed to push metrics: {e}")
 
 if __name__ == "__main__":
     main()
+
