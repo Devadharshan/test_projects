@@ -1,103 +1,80 @@
 import subprocess
-import time
 import re
+import time
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 import logging
 from pathlib import Path
-from prometheus_client import CollectorRegistry, Gauge, pushadd_to_gateway
 
-# ------------------------ CONFIG ------------------------
-LOG_DIR = "/path/to/logs"  # ✅ Set this
-PUSHGATEWAY_URL = "http://localhost:9091"  # ✅ Set this
-APP_NAME = "log_processor"
+# --- Logging Setup ---
+logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+
+# --- Config ---
+LOG_PATH = "/path/to/logs"
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "log_monitor"
 ENV = "prod"
-CUSTOM_KEYWORDS = ["timeout", "connection", "unavailable"]
+CUSTOM_KEYWORDS = ["timeout", "failed", "refused"]
+FILE_EXTENSIONS = [".log", ".err", ".out", ".nohup_log"]
 
-# ------------------------ LOGGING ------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-)
+ERROR_PATTERN = re.compile(r"\b\w*Error\w*\b", re.IGNORECASE)
+EXCEPTION_PATTERN = re.compile(r"\b\w*Exception\w*\b", re.IGNORECASE)
 
-# ------------------------ FUNCTIONS ------------------------
-def detect_keywords(line, keywords):
-    matches = []
-    for keyword in keywords:
-        if keyword.lower() in line.lower():
-            matches.append(keyword)
-    return matches
+# --- Collector Registry ---
+registry = CollectorRegistry()
+log_metric = Gauge('log_occurrence',
+                   'Log occurrences with error/exception/custom keyword',
+                   ['app_name', 'env', 'file_name', 'folder', 'line_number', 'error_type', 'timestamp'],
+                   registry=registry)
 
-def push_metric(file_path, folder, keyword, label_type, line_number, timestamp):
-    registry = CollectorRegistry()
-    g = Gauge(
-        'log_occurrence',
-        'Tracks errors, exceptions, and custom keywords in logs',
-        ['app', 'env', 'folder', 'file', 'keyword', 'type', 'line_number', 'timestamp'],
-        registry=registry
-    )
+# --- Get All Files with Subprocess ---
+def get_log_files(path):
+    cmd = ["find", path, "-type", "f"]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    files = result.stdout.strip().split('\n')
+    return [f for f in files if any(f.endswith(ext) for ext in FILE_EXTENSIONS)]
 
-    g.labels(
-        app=APP_NAME,
-        env=ENV,
-        folder=folder,
-        file=Path(file_path).name,
-        keyword=keyword,
-        type=label_type,
-        line_number=str(line_number),
-        timestamp=timestamp
-    ).set(1)
-
-    # ✅ Use unique grouping_key to avoid overwriting
-    pushadd_to_gateway(
-        PUSHGATEWAY_URL,
-        job=APP_NAME,
-        registry=registry,
-        grouping_key={
-            'file': Path(file_path).name,
-            'line': str(line_number),
-            'keyword': keyword,
-            'env': ENV,
-        }
-    )
-
+# --- Process File ---
 def process_file(file_path):
+    app_name = Path(file_path).stem
     folder = str(Path(file_path).parent)
-    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
-    with open(file_path, 'r', errors='ignore') as f:
-        for i, line in enumerate(f, 1):
-            matches = detect_keywords(line, ['error', 'exception'] + CUSTOM_KEYWORDS)
-            for keyword in matches:
-                label_type = 'custom'
-                if keyword.lower() in ['error', 'exception']:
-                    label_type = 'error'
-                    match = re.search(r'(\w+Exception|\w+Error)', line)
-                    if match:
-                        keyword = match.group(1)
-                        label_type = 'exception'
-                logging.info(f"{file_path} | Line {i} | {label_type.upper()} | {keyword}")
-                push_metric(file_path, folder, keyword, label_type, i, timestamp)
+    file_name = Path(file_path).name
 
-# ------------------------ MAIN ------------------------
+    try:
+        with open(file_path, 'r', errors='ignore') as f:
+            for line_num, line in enumerate(f, 1):
+                line_lower = line.lower()
+
+                if any(kw in line_lower for kw in CUSTOM_KEYWORDS) or ERROR_PATTERN.search(line) or EXCEPTION_PATTERN.search(line):
+                    match = ERROR_PATTERN.search(line) or EXCEPTION_PATTERN.search(line)
+                    error_type = match.group(0) if match else "custom"
+                    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+
+                    log_metric.labels(
+                        app_name=app_name,
+                        env=ENV,
+                        file_name=file_name,
+                        folder=folder,
+                        line_number=str(line_num),
+                        error_type=error_type,
+                        timestamp=timestamp
+                    ).set(1)
+
+    except Exception as e:
+        logging.error(f"Failed to read {file_path}: {e}")
+
+# --- Main ---
 def main():
-    log_extensions = [".log", ".err", ".out", ".nohup_log"]
-    log_files = []
+    logging.info("🔍 Scanning log files...")
+    files = get_log_files(LOG_PATH)
+    for file in files:
+        process_file(file)
 
-    find_cmd = ['find', LOG_DIR, '-type', 'f']
-    result = subprocess.run(find_cmd, stdout=subprocess.PIPE, text=True)
-    all_files = result.stdout.strip().split('\n')
-
-    for file_path in all_files:
-        if any(file_path.endswith(ext) for ext in log_extensions):
-            log_files.append(file_path)
-
-    logging.info(f"Found {len(log_files)} files. Processing...")
-
-    for file_path in log_files:
-        try:
-            process_file(file_path)
-        except Exception as e:
-            logging.error(f"Error processing {file_path}: {e}")
-
-    logging.info("✅ All logs processed.")
+    logging.info("📤 Pushing metrics to PushGateway...")
+    try:
+        push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+        logging.info("✅ All metrics pushed successfully.")
+    except Exception as e:
+        logging.error(f"❌ Failed to push metrics: {e}")
 
 if __name__ == "__main__":
     main()
