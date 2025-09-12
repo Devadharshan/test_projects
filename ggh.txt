@@ -1,0 +1,1 @@
+curl -k https://localhost:9200/metricbeat-*/_search?pretty -u elastic:<your_password>
