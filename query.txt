@@ -1,0 +1,89 @@
+1️⃣ System Metrics
+CPU Usage %
+100 - (avg by(instance) (irate(windows_cpu_time_total{mode="idle", instance=~"$host"}[1m])) * 100)
+Memory Usage %
+100 * (1 - (windows_cs_physical_memory_free_bytes{instance=~"$host"} / windows_cs_physical_memory_bytes{instance=~"$host"}))
+Page File Usage %
+100 * (windows_cs_page_file_usage_bytes{instance=~"$host"} / windows_cs_page_file_total_bytes{instance=~"$host"})
+2️⃣ Disk Metrics
+Disk Usage % per Volume
+100 - ((windows_logical_disk_free_bytes{instance=~"$host"} / windows_logical_disk_size_bytes{instance=~"$host"}) * 100)
+Disk Read Bytes/sec per Volume
+rate(windows_logical_disk_bytes_read_total{instance=~"$host"}[1m])
+Disk Write Bytes/sec per Volume
+rate(windows_logical_disk_bytes_written_total{instance=~"$host"}[1m])
+Disk Queue Length
+windows_logical_disk_current_queue_length{instance=~"$host"}
+3️⃣ Network Metrics
+Bytes Received per Interface
+rate(windows_net_bytes_received_total{instance=~"$host"}[1m])
+Bytes Sent per Interface
+rate(windows_net_bytes_sent_total{instance=~"$host"}[1m])
+Total Network Traffic per Host
+sum by(instance) (rate(windows_net_bytes_received_total{instance=~"$host"}[1m]) + rate(windows_net_bytes_sent_total{instance=~"$host"}[1m]))
+Network Errors (Optional)
+rate(windows_net_packets_recv_err_total{instance=~"$host"}[1m])
+rate(windows_net_packets_sent_err_total{instance=~"$host"}[1m])
+4️⃣ Process Metrics
+Top 5 Processes by CPU %
+topk(5, rate(windows_process_cpu_time_total{instance=~"$host"}[1m]))
+Top 5 Processes by Memory % of Total
+topk(5, (windows_process_working_set_bytes{instance=~"$host"} / windows_cs_physical_memory_bytes{instance=~"$host"}) * 100)
+Process Handle Count
+windows_process_handle_count{instance=~"$host"}
+5️⃣ Optional / Extra Metrics
+System uptime:
+windows_os_system_up_time_seconds{instance=~"$host"}
+Service status (running/stopped):
+windows_service_state{instance=~"$host"}
+Kernel/system metrics:
+windows_system_context_switches_total{instance=~"$host"}
+windows_system_interrupts_total{instance=~"$host"}
+
+
+
+
+
+
+1️⃣ System Metrics
+CPU Usage %
+100 - (avg by(instance) (irate(windows_cpu_time_total{mode="idle", instance=~"$host"}[1m])) * 100)
+Memory Usage %
+100 * (1 - (windows_cs_physical_memory_free_bytes{instance=~"$host"} / windows_cs_physical_memory_bytes{instance=~"$host"}))
+Page File Usage %
+100 * (windows_cs_page_file_usage_bytes{instance=~"$host"} / windows_cs_page_file_total_bytes{instance=~"$host"})
+2️⃣ Disk Metrics
+Disk Usage % per Volume
+100 - ((windows_logical_disk_free_bytes{instance=~"$host"} / windows_logical_disk_size_bytes{instance=~"$host"}) * 100)
+Disk Read Bytes/sec per Volume
+rate(windows_logical_disk_bytes_read_total{instance=~"$host"}[1m])
+Disk Write Bytes/sec per Volume
+rate(windows_logical_disk_bytes_written_total{instance=~"$host"}[1m])
+Disk Queue Length
+windows_logical_disk_current_queue_length{instance=~"$host"}
+3️⃣ Network Metrics
+Bytes Received per Interface
+rate(windows_net_bytes_received_total{instance=~"$host"}[1m])
+Bytes Sent per Interface
+rate(windows_net_bytes_sent_total{instance=~"$host"}[1m])
+Total Network Traffic per Host
+sum by(instance) (rate(windows_net_bytes_received_total{instance=~"$host"}[1m]) + rate(windows_net_bytes_sent_total{instance=~"$host"}[1m]))
+Network Errors (Optional)
+rate(windows_net_packets_recv_err_total{instance=~"$host"}[1m])
+rate(windows_net_packets_sent_err_total{instance=~"$host"}[1m])
+4️⃣ Process Metrics
+Top 5 Processes by CPU %
+topk(5, rate(windows_process_cpu_time_total{instance=~"$host"}[1m]))
+Top 5 Processes by Memory % of Total
+topk(5, (windows_process_working_set_bytes{instance=~"$host"} / windows_cs_physical_memory_bytes{instance=~"$host"}) * 100)
+Process Handle Count
+windows_process_handle_count{instance=~"$host"}
+5️⃣ Optional / Extra Metrics
+System uptime:
+windows_os_system_up_time_seconds{instance=~"$host"}
+Service status (running/stopped):
+windows_service_state{instance=~"$host"}
+Kernel/system metrics:
+windows_system_context_switches_total{instance=~"$host"}
+windows_system_interrupts_total{instance=~"$host"}
+
