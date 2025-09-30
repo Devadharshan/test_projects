@@ -1,0 +1,199 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "gnetId": null,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "type": "row",
+      "title": "System Metrics",
+      "collapsed": false
+    },
+    {
+      "type": "graph",
+      "title": "CPU Usage (%)",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "100 - (avg by (instance) (irate(windows_cpu_time_total{mode=\"idle\", host=\"$host\"}[1m])) * 100)",
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Memory Usage (%)",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "100 * (1 - (windows_os_physical_memory_free_bytes{host=\"$host\"} / windows_cs_physical_memory_bytes{host=\"$host\"}))",
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Disk Usage (%) per Volume",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "100 * (1 - (windows_logical_disk_free_bytes{host=\"$host\"} / windows_logical_disk_size_bytes{host=\"$host\"}))",
+          "legendFormat": "{{volume}}"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Disk Read Bytes/sec",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(windows_logical_disk_read_bytes_total{host=\"$host\"}[1m])",
+          "legendFormat": "{{volume}}"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Disk Write Bytes/sec",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(windows_logical_disk_write_bytes_total{host=\"$host\"}[1m])",
+          "legendFormat": "{{volume}}"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Network Rx Bytes/sec",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(windows_net_bytes_received_total{host=\"$host\"}[1m])",
+          "legendFormat": "{{interface}}"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Network Tx Bytes/sec",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(windows_net_bytes_sent_total{host=\"$host\"}[1m])",
+          "legendFormat": "{{interface}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Process Metrics",
+      "collapsed": false
+    },
+    {
+      "type": "graph",
+      "title": "Top 5 Processes CPU (%)",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "topk(5, rate(windows_process_cpu_seconds_total{host=\"$host\"}[1m]))",
+          "legendFormat": "{{process}}"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Top 5 Processes Memory (%)",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "topk(5, windows_process_working_set_bytes{host=\"$host\"} / windows_cs_physical_memory_bytes{host=\"$host\"} * 100)",
+          "legendFormat": "{{process}}"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": ".NET App CPU (%)",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "100 * rate(windows_process_cpu_seconds_total{host=\"$host\", process=\"$process\"}[1m])",
+          "legendFormat": "{{process}}"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": ".NET App Memory MB",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "windows_process_working_set_bytes{host=\"$host\", process=\"$process\"} / 1024 / 1024",
+          "legendFormat": "{{process}}"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": ".NET App Private Bytes MB",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "windows_process_private_bytes{host=\"$host\", process=\"$process\"} / 1024 / 1024",
+          "legendFormat": "{{process}}"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": ".NET App Threads",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "windows_process_threads{host=\"$host\", process=\"$process\"}",
+          "legendFormat": "{{process}}"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": ".NET App Handles",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "windows_process_handles{host=\"$host\", process=\"$process\"}",
+          "legendFormat": "{{process}}"
+        }
+      ]
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "host",
+        "type": "query",
+        "query": "label_values(up, host)",
+        "datasource": "Prometheus",
+        "includeAll": true,
+        "refresh": 1
+      },
+      {
+        "name": "process",
+        "type": "query",
+        "query": "label_values(windows_process_cpu_seconds_total, process)",
+        "datasource": "Prometheus",
+        "includeAll": true,
+        "refresh": 1
+      }
+    ]
+  },
+  "schemaVersion": 36,
+  "version": 1,
+  "title": "Windows Servers & .NET App Monitoring"
+}
