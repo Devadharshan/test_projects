@@ -1,0 +1,26 @@
+def read_file(file_path):
+    """Read Excel or HTML disguised as Excel"""
+    try:
+        with open(file_path, "rb") as f:
+            start = f.read(200).lower()  # read first 200 bytes
+            if b"<html" in start or b"<!doctype html" in start:
+                # It's actually HTML
+                df_list = pd.read_html(file_path, flavor="lxml")
+                df = df_list[0]
+            else:
+                # Real Excel
+                if file_path.endswith(".xls"):
+                    df = pd.read_excel(file_path, engine="xlrd", dtype=str)
+                elif file_path.endswith(".xlsx"):
+                    df = pd.read_excel(file_path, engine="openpyxl", dtype=str)
+                else:
+                    logging.warning(f"Unsupported file format: {file_path}")
+                    return None
+
+        # Normalize column names
+        df.columns = normalize_columns(df.columns)
+        return df
+
+    except Exception as e:
+        logging.error(f"Error reading {file_path}: {e}")
+        return None
