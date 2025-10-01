@@ -1,0 +1,1 @@
+windows_exporter.exe --collectors.enabled="cpu,mem,logical_disk,textfile" --collector.textfile.directory="C:\custom_metrics"
