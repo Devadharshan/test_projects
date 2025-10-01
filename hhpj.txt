@@ -1,0 +1,3 @@
+cpu,cs,logical_disk,net,os,system,memory,process,textfile
+
+--collector.textfile.directory="C:\Program Files\windows_exporter\textfile_inputs"
