@@ -10,37 +10,59 @@ out_file = r"C:\node_exporter\textfile_inputs\large_files.prom"
 # File size threshold (1GB)
 SIZE_LIMIT = 1 * (1024 ** 3)
 
+# Top N files per drive
+TOP_N = 10
+
 def safe_label(text):
     """Convert a path or name into safe Prometheus label value"""
     return text.replace(":", "").replace("\\", "_").replace("/", "_").replace(" ", "_")
 
 def scan_large_files(dirs):
     metrics = []
+
     for d in dirs:
+        # Collect all large files first
+        large_files = []
         for root, _, files in os.walk(d):
             for f in files:
                 try:
                     path = os.path.join(root, f)
                     size = os.path.getsize(path)
                     if size > SIZE_LIMIT:
-                        folder = os.path.dirname(path)
-                        safe_folder = safe_label(folder)
-                        safe_file = safe_label(f)
-
-                        metrics.append(
-                            'large_file_size_bytes{{folder="{0}",file="{1}"}} {2}'.format(
-                                safe_folder, safe_file, size
-                            )
-                        )
-                except Exception as e:
+                        large_files.append((path, size))
+                except:
                     continue
+
+        # Sort descending by size
+        large_files.sort(key=lambda x: x[1], reverse=True)
+
+        # Keep only top N
+        for path, size in large_files[:TOP_N]:
+            folder = os.path.dirname(path)
+            safe_folder = safe_label(folder)
+            safe_file = safe_label(os.path.basename(path))
+
+            # Bytes
+            metrics.append(
+                'large_file_size_bytes{{directory="{0}",file="{1}"}} {2}'.format(
+                    safe_folder, safe_file, size
+                )
+            )
+
+            # GB
+            metrics.append(
+                'large_file_size_gigabytes{{directory="{0}",file="{1}"}} {2:.2f}'.format(
+                    safe_folder, safe_file, size / float(1024**3)
+                )
+            )
+
     return metrics
 
 if __name__ == "__main__":
     start = time.time()
     metrics = scan_large_files(directories)
     runtime = time.time() - start
-    metrics.append('scan_runtime_seconds {0}'.format(runtime))
+    metrics.append('scan_runtime_seconds {0:.2f}'.format(runtime))
 
     with open(out_file, "w") as f:
         f.write("\n".join(metrics) + "\n")
