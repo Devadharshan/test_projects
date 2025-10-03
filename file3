@@ -7,27 +7,39 @@ directories = ["C:\\", "D:\\"]
 # Output prom file
 out_file = r"C:\node_exporter\textfile_inputs\large_files.prom"
 
-def scan_large_files(dirs, size_limit_gb=1):
+# Size threshold (1GB)
+SIZE_LIMIT = 1 * (1024 ** 3)
+
+def scan_large_files(dirs):
     metrics = []
-    size_limit = size_limit_gb * (1024 ** 3)
+    visited_folders = set()
 
     for d in dirs:
         file_count = 0
         total_size = 0
 
         for root, _, files in os.walk(d):
+            # Normalize to top-level folder only
+            parts = root.split(os.sep)
+            if len(parts) > 3:   # e.g., C:\Oracle\client\3.15\app
+                top_folder = os.sep.join(parts[:3])  
+            else:
+                top_folder = root
+
+            if top_folder in visited_folders:
+                continue
+            visited_folders.add(top_folder)
+
             for f in files:
                 try:
                     path = os.path.join(root, f)
                     size = os.path.getsize(path)
-                    if size > size_limit:
+                    if size > SIZE_LIMIT:
                         file_count += 1
                         total_size += size
-                except Exception as e:
-                    # skip inaccessible files
-                    continue  
+                except:
+                    continue
 
-        # Export metrics
         metrics.append('large_files_count{{directory="{0}"}} {1}'.format(d, file_count))
         metrics.append('large_files_total_size_bytes{{directory="{0}"}} {1}'.format(d, total_size))
 
@@ -36,7 +48,6 @@ def scan_large_files(dirs, size_limit_gb=1):
 if __name__ == "__main__":
     start = time.time()
     metrics = scan_large_files(directories)
-
     runtime = time.time() - start
     metrics.append('scan_runtime_seconds {0}'.format(runtime))
 
