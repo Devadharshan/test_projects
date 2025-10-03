@@ -62,3 +62,65 @@ with open(tmp_file, 'wb') as f:
 os.rename(tmp_file, prom_file)
 
 print("Prometheus file generated: %s" % prom_file)
+
+
+
+
+
+
+
+------------------------------------------------------
+
+
+
+
+
+import os
+import time
+
+# Directories to scan
+directories = ["C:\\", "D:\\"]
+
+# Output prom file
+out_file = r"C:\node_exporter\textfile_inputs\large_files.prom"
+
+def scan_large_files(dirs, size_limit_gb=1):
+    metrics = []
+    size_limit = size_limit_gb * (1024 ** 3)
+
+    for d in dirs:
+        file_count = 0
+        total_size = 0
+
+        for root, _, files in os.walk(d):
+            for f in files:
+                try:
+                    path = os.path.join(root, f)
+                    size = os.path.getsize(path)
+                    if size > size_limit:
+                        file_count += 1
+                        total_size += size
+                except Exception:
+                    continue  # skip inaccessible files
+
+        # Export per-directory metrics
+        metrics.append(
+            f'large_files_count{{directory="{d}"}} {file_count}'
+        )
+        metrics.append(
+            f'large_files_total_size_bytes{{directory="{d}"}} {total_size}'
+        )
+
+    return metrics
+
+if __name__ == "__main__":
+    start = time.time()
+    metrics = scan_large_files(directories)
+
+    # Add script runtime metric
+    runtime = time.time() - start
+    metrics.append(f'scan_runtime_seconds {runtime}')
+
+    with open(out_file, "w") as f:
+        f.write("\n".join(metrics) + "\n")
+
