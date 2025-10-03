@@ -1,81 +1,4 @@
 import os
-import re
-
-# -------------------------------
-# Config
-# -------------------------------
-scan_dir = r"C:\data"                      # Directory to scan
-prom_dir = r"C:\custom_metrics"            # Windows Exporter textfile directory
-prom_file = os.path.join(prom_dir, "large_files.prom")
-
-size_threshold = 1024 * 1024 * 1024  # 1 GB in bytes
-
-# -------------------------------
-# Helpers
-# -------------------------------
-def sanitize_label(value):
-    """Escape labels for Prometheus"""
-    value = value.replace("\\", "\\\\")
-    value = value.replace('"', '\\"')
-    return value
-
-def sanitize_name(name):
-    """Ensure metric name validity"""
-    name = re.sub(r'\W', '_', name)
-    if not re.match(r'[a-zA-Z_]', name[0]):
-        name = "_" + name
-    return name
-
-# -------------------------------
-# Scan files
-# -------------------------------
-lines = []
-lines.append("# HELP large_files Size of files >1GB")
-lines.append("# TYPE large_files gauge")
-
-for root, dirs, files in os.walk(scan_dir):
-    for fname in files:
-        try:
-            full_path = os.path.join(root, fname)
-            size = os.path.getsize(full_path)
-            if size > size_threshold:
-                dir_label = sanitize_label(root)
-                file_label = sanitize_label(fname)
-                size_gb = round(float(size) / (1024*1024*1024), 2)
-
-                metric = 'large_files{directory="%s",filename="%s"} %s' % (
-                    dir_label, file_label, size_gb
-                )
-                lines.append(metric)
-        except Exception as e:
-            continue
-
-# -------------------------------
-# Safe write
-# -------------------------------
-if not os.path.exists(prom_dir):
-    os.makedirs(prom_dir)
-
-tmp_file = prom_file + ".tmp"
-with open(tmp_file, 'wb') as f:
-    f.write("\n".join(lines).encode('ascii', 'replace') + "\n")
-os.rename(tmp_file, prom_file)
-
-print("Prometheus file generated: %s" % prom_file)
-
-
-
-
-
-
-
-------------------------------------------------------
-
-
-
-
-
-import os
 import time
 
 # Directories to scan
@@ -100,16 +23,13 @@ def scan_large_files(dirs, size_limit_gb=1):
                     if size > size_limit:
                         file_count += 1
                         total_size += size
-                except Exception:
-                    continue  # skip inaccessible files
+                except Exception as e:
+                    # skip inaccessible files
+                    continue  
 
-        # Export per-directory metrics
-        metrics.append(
-            f'large_files_count{{directory="{d}"}} {file_count}'
-        )
-        metrics.append(
-            f'large_files_total_size_bytes{{directory="{d}"}} {total_size}'
-        )
+        # Export metrics
+        metrics.append('large_files_count{{directory="{0}"}} {1}'.format(d, file_count))
+        metrics.append('large_files_total_size_bytes{{directory="{0}"}} {1}'.format(d, total_size))
 
     return metrics
 
@@ -117,10 +37,8 @@ if __name__ == "__main__":
     start = time.time()
     metrics = scan_large_files(directories)
 
-    # Add script runtime metric
     runtime = time.time() - start
-    metrics.append(f'scan_runtime_seconds {runtime}')
+    metrics.append('scan_runtime_seconds {0}'.format(runtime))
 
     with open(out_file, "w") as f:
         f.write("\n".join(metrics) + "\n")
-
