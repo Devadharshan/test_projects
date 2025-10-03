@@ -10,6 +10,10 @@ out_file = r"C:\node_exporter\textfile_inputs\large_files.prom"
 # Size threshold (1GB)
 SIZE_LIMIT = 1 * (1024 ** 3)
 
+def safe_label(path):
+    """Convert Windows path into safe Prometheus label value"""
+    return path.replace(":", "").replace("\\", "_").replace(" ", "_")
+
 def scan_large_files(dirs):
     metrics = []
     visited_folders = set()
@@ -21,8 +25,8 @@ def scan_large_files(dirs):
         for root, _, files in os.walk(d):
             # Normalize to top-level folder only
             parts = root.split(os.sep)
-            if len(parts) > 3:   # e.g., C:\Oracle\client\3.15\app
-                top_folder = os.sep.join(parts[:3])  
+            if len(parts) > 3:
+                top_folder = os.sep.join(parts[:3])
             else:
                 top_folder = root
 
@@ -40,8 +44,9 @@ def scan_large_files(dirs):
                 except:
                     continue
 
-        metrics.append('large_files_count{{directory="{0}"}} {1}'.format(d, file_count))
-        metrics.append('large_files_total_size_bytes{{directory="{0}"}} {1}'.format(d, total_size))
+        label = safe_label(d)
+        metrics.append('large_files_count{{directory="{0}"}} {1}'.format(label, file_count))
+        metrics.append('large_files_total_size_bytes{{directory="{0}"}} {1}'.format(label, total_size))
 
     return metrics
 
