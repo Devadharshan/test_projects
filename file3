@@ -4,50 +4,36 @@ import time
 # Directories to scan
 directories = ["C:\\", "D:\\"]
 
-# Output prom file
+# Output file for Windows exporter textfile collector
 out_file = r"C:\node_exporter\textfile_inputs\large_files.prom"
 
-# Size threshold (1GB)
+# File size threshold (1GB)
 SIZE_LIMIT = 1 * (1024 ** 3)
 
-def safe_label(path):
-    """Convert Windows path into safe Prometheus label value"""
-    return path.replace(":", "").replace("\\", "_").replace(" ", "_")
+def safe_label(text):
+    """Convert a path or name into safe Prometheus label value"""
+    return text.replace(":", "").replace("\\", "_").replace("/", "_").replace(" ", "_")
 
 def scan_large_files(dirs):
     metrics = []
-    visited_folders = set()
-
     for d in dirs:
-        file_count = 0
-        total_size = 0
-
         for root, _, files in os.walk(d):
-            # Normalize to top-level folder only
-            parts = root.split(os.sep)
-            if len(parts) > 3:
-                top_folder = os.sep.join(parts[:3])
-            else:
-                top_folder = root
-
-            if top_folder in visited_folders:
-                continue
-            visited_folders.add(top_folder)
-
             for f in files:
                 try:
                     path = os.path.join(root, f)
                     size = os.path.getsize(path)
                     if size > SIZE_LIMIT:
-                        file_count += 1
-                        total_size += size
-                except:
+                        folder = os.path.dirname(path)
+                        safe_folder = safe_label(folder)
+                        safe_file = safe_label(f)
+
+                        metrics.append(
+                            'large_file_size_bytes{{folder="{0}",file="{1}"}} {2}'.format(
+                                safe_folder, safe_file, size
+                            )
+                        )
+                except Exception as e:
                     continue
-
-        label = safe_label(d)
-        metrics.append('large_files_count{{directory="{0}"}} {1}'.format(label, file_count))
-        metrics.append('large_files_total_size_bytes{{directory="{0}"}} {1}'.format(label, total_size))
-
     return metrics
 
 if __name__ == "__main__":
