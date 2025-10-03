@@ -42,14 +42,14 @@ def scan_large_files(dirs):
             safe_folder = safe_label(folder)
             safe_file = safe_label(os.path.basename(path))
 
-            # Bytes
+            # Bytes (integer formatting to avoid scientific notation)
             metrics.append(
-                'large_file_size_bytes{{directory="{0}",file="{1}"}} {2}'.format(
+                'large_file_size_bytes{{directory="{0}",file="{1}"}} {2:d}'.format(
                     safe_folder, safe_file, size
                 )
             )
 
-            # GB
+            # GB (2 decimal places)
             metrics.append(
                 'large_file_size_gigabytes{{directory="{0}",file="{1}"}} {2:.2f}'.format(
                     safe_folder, safe_file, size / float(1024**3)
