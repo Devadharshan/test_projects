@@ -1,0 +1,81 @@
+# -*- coding: ascii -*-
+import os
+import csv
+
+# === CONFIG ===
+CSV_FOLDER = r"C:\windows_exporter\csv_input"      # Folder containing CSV files
+PROM_FOLDER = r"C:\windows_exporter\textfiles"     # Windows Exporter textfile collector folder
+METRIC_NAME = "csv_job"                            # Single metric name
+ROW_LABEL = "row"                                  # Label for row number
+
+
+def sanitize_label_name(name):
+    """Make label names Prometheus-safe: only a-z, A-Z, 0-9, _"""
+    valid = []
+    for c in name:
+        if c.isalnum() or c == "_":
+            valid.append(c)
+        else:
+            valid.append("_")
+    return "".join(valid)
+
+
+def convert_csv_to_prom(csv_path, prom_path):
+    print("[*] Processing: %s" % os.path.basename(csv_path))
+    try:
+        lines = []
+        with open(csv_path, 'rb') as csvfile:
+            reader = csv.reader(csvfile)
+            headers = next(reader, None)
+
+            if not headers:
+                print("[!] No columns found in %s - skipping." % csv_path)
+                return
+
+            # sanitize all header names for Prometheus labels
+            headers_sanitized = [sanitize_label_name(h.strip()) for h in headers]
+
+            for idx, row in enumerate(reader, start=1):
+                labels = ['%s="%s"' % (ROW_LABEL, idx)]
+                for col_i in range(len(headers_sanitized)):
+                    if col_i >= len(row):
+                        continue
+                    value = row[col_i].strip().replace('"', '\\"')
+                    labels.append('%s="%s"' % (headers_sanitized[col_i], value))
+                # Dummy value 1
+                line = '%s{%s} 1' % (METRIC_NAME, ",".join(labels))
+                lines.append(line)
+
+        if lines:
+            content = "\n".join(lines) + "\n"  # final newline required
+            with open(prom_path, 'wb') as promfile:
+                promfile.write(content)
+            print("[OK] Created: %s (%d rows)" % (prom_path, len(lines)))
+        else:
+            print("[!] No valid data in %s" % csv_path)
+
+    except Exception as e:
+        print("[ERR] %s: %s" % (csv_path, e))
+
+
+def main():
+    if not os.path.exists(CSV_FOLDER):
+        os.makedirs(CSV_FOLDER)
+    if not os.path.exists(PROM_FOLDER):
+        os.makedirs(PROM_FOLDER)
+
+    csv_files = [f for f in os.listdir(CSV_FOLDER) if f.lower().endswith('.csv')]
+    if not csv_files:
+        print("[!] No CSV files found in input folder.")
+        return
+
+    for csv_file in csv_files:
+        csv_path = os.path.join(CSV_FOLDER, csv_file)
+        prom_path = os.path.join(PROM_FOLDER, csv_file.replace(".csv", ".prom"))
+        convert_csv_to_prom(csv_path, prom_path)
+
+    print("✅ Conversion complete. Metrics ready for Windows Exporter.")
+
+
+if __name__ == "__main__":
+    main()
