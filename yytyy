@@ -1,0 +1,75 @@
+import os
+import csv
+
+# === CONFIG ===
+CSV_FOLDER = r"C:\windows_exporter\csv_input"          # Folder containing your CSV files
+PROM_FOLDER = r"C:\windows_exporter\textfiles"         # Windows Exporter textfile collector folder
+ROW_LABEL = "row"                                      # Label name for row number
+
+
+def convert_csv_to_prom(csv_path, prom_path):
+    print("[*] Processing: %s" % os.path.basename(csv_path))
+
+    try:
+        lines = []
+        with open(csv_path, 'rb') as csvfile:
+            reader = csv.reader(csvfile)
+            headers = next(reader, None)
+
+            if not headers:
+                print("[!] No columns found in %s - skipping." % csv_path)
+                return
+
+            for idx, row in enumerate(reader, start=1):
+                for col_i in range(len(headers)):
+                    col = headers[col_i].strip().replace(" ", "_").replace("-", "_")
+                    if col_i >= len(row):
+                        continue
+                    value = row[col_i].strip()
+
+                    if value == "":
+                        continue  # Skip empty cells
+
+                    metric_name = "csv_" + col
+
+                    try:
+                        num_val = float(value)
+                        line = '%s{%s="%s"} %s' % (metric_name, ROW_LABEL, idx, num_val)
+                    except ValueError:
+                        val_sanitized = value.replace('"', '\\"')
+                        line = '%s{%s="%s", value="%s"} 1' % (metric_name, ROW_LABEL, idx, val_sanitized)
+
+                    lines.append(line)
+
+        if lines:
+            with open(prom_path, 'wb') as promfile:
+                promfile.write("\n".join(lines))
+            print("[✓] Created: %s (%d metrics)" % (prom_path, len(lines)))
+        else:
+            print("[!] No valid data in %s" % csv_path)
+
+    except Exception as e:
+        print("[x] Error processing %s: %s" % (csv_path, e))
+
+
+def main():
+    if not os.path.exists(CSV_FOLDER):
+        os.makedirs(CSV_FOLDER)
+    if not os.path.exists(PROM_FOLDER):
+        os.makedirs(PROM_FOLDER)
+
+    csv_files = [f for f in os.listdir(CSV_FOLDER) if f.endswith('.csv')]
+    if not csv_files:
+        print("[!] No CSV files found in input folder.")
+        return
+
+    for csv_file in csv_files:
+        csv_path = os.path.join(CSV_FOLDER, csv_file)
+        prom_path = os.path.join(PROM_FOLDER, csv_file.replace(".csv", ".prom"))
+        convert_csv_to_prom(csv_path, prom_path)
+
+    print("\n✅ Conversion complete. Metrics ready for Windows Exporter.")
+
+
+if __name__ == "__main__":
+    main()
