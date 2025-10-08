@@ -1,0 +1,83 @@
+# -*- coding: ascii -*-
+import os
+import csv
+
+# === CONFIG ===
+CSV_FOLDER = r"C:\windows_exporter\csv_input"      # Folder containing CSV files
+PROM_FOLDER = r"C:\windows_exporter\textfiles"     # Windows Exporter textfile collector folder
+METRIC_NAME = "csv_job"                            # Single metric name
+ROW_LABEL = "row"                                  # Label for row number
+
+# List numeric columns exactly as they appear in CSV
+NUMERIC_COLUMNS = ["duration", "no of trades", "duration per trade"]
+
+
+def convert_csv_to_prom(csv_path, prom_path):
+    print("[*] Processing: %s" % os.path.basename(csv_path))
+    try:
+        lines = []
+        with open(csv_path, 'rb') as csvfile:
+            reader = csv.reader(csvfile)
+            headers = next(reader, None)
+            if not headers:
+                print("[!] No columns found in %s - skipping." % csv_path)
+                return
+
+            for idx, row in enumerate(reader, start=1):
+                labels = ['%s="%s"' % (ROW_LABEL, idx)]
+                metric_value = None
+
+                for col_i in range(len(headers)):
+                    if col_i >= len(row):
+                        continue
+                    col_name = headers[col_i].strip()  # Keep exact name from CSV
+                    value = row[col_i].strip().replace('"', '\\"')
+
+                    # Determine numeric vs text
+                    if col_name in NUMERIC_COLUMNS:
+                        try:
+                            metric_value = float(value)
+                        except ValueError:
+                            metric_value = 0
+                    else:
+                        labels.append('%s="%s"' % (col_name, value))
+
+                if metric_value is None:
+                    metric_value = 1  # default dummy value for rows with no numeric columns
+
+                line = '%s{%s} %s' % (METRIC_NAME, ",".join(labels), metric_value)
+                lines.append(line)
+
+        if lines:
+            content = "\n".join(lines) + "\n"  # final newline required by Windows Exporter
+            with open(prom_path, 'wb') as promfile:
+                promfile.write(content)
+            print("[OK] Created: %s (%d rows)" % (prom_path, len(lines)))
+        else:
+            print("[!] No valid data in %s" % csv_path)
+
+    except Exception as e:
+        print("[ERR] %s: %s" % (csv_path, e))
+
+
+def main():
+    if not os.path.exists(CSV_FOLDER):
+        os.makedirs(CSV_FOLDER)
+    if not os.path.exists(PROM_FOLDER):
+        os.makedirs(PROM_FOLDER)
+
+    csv_files = [f for f in os.listdir(CSV_FOLDER) if f.lower().endswith('.csv')]
+    if not csv_files:
+        print("[!] No CSV files found in input folder.")
+        return
+
+    for csv_file in csv_files:
+        csv_path = os.path.join(CSV_FOLDER, csv_file)
+        prom_path = os.path.join(PROM_FOLDER, csv_file.replace(".csv", ".prom"))
+        convert_csv_to_prom(csv_path, prom_path)
+
+    print("✅ Conversion complete. Metrics ready for Windows Exporter.")
+
+
+if __name__ == "__main__":
+    main()
