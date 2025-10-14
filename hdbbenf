@@ -1,0 +1,37 @@
+import csv
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# === CONFIGURATION ===
+CSV_FILE = "data.csv"
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "csv_all_data"
+
+registry = CollectorRegistry()
+
+# === Read CSV ===
+with open(CSV_FILE, "r", newline="") as f:
+    reader = csv.DictReader(f)
+    headers = reader.fieldnames
+
+    for row_num, row in enumerate(reader, start=1):
+        # Convert all values to strings (for labels)
+        labels = {key.lower().replace(" ", "_"): str(value) for key, value in row.items()}
+
+        # Try to push each numeric value as a metric
+        for col, val in row.items():
+            try:
+                numeric_value = float(val)
+            except (ValueError, TypeError):
+                continue  # skip non-numeric columns as metric values
+
+            metric_name = "csv_" + col.lower().replace(" ", "_")
+            g = Gauge(
+                metric_name,
+                "Metric from CSV column: {}".format(col),
+                labels.keys(),
+                registry=registry
+            )
+            g.labels(**labels).set(numeric_value)
+
+push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+print("✅ Successfully pushed ALL CSV data (numeric + text) to Pushgateway!")
