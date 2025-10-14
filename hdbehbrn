@@ -1,0 +1,52 @@
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+import pandas as pd
+
+# === CONFIG ===
+csv_file = "data.csv"
+pushgateway_url = "http://localhost:9091"  # Change to your Pushgateway endpoint
+job_name = "csv_data_push"
+
+# === READ CSV ===
+df = pd.read_csv(csv_file)
+
+# === CLEAN COLUMN NAMES (make them Prometheus-safe) ===
+safe_col_map = {col: col.strip().lower().replace(" ", "_") for col in df.columns}
+df.rename(columns=safe_col_map, inplace=True)
+
+# === SPLIT COLUMNS BY TYPE ===
+numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+text_cols = [c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c])]
+
+print(f"📊 Found {len(numeric_cols)} numeric columns: {numeric_cols}")
+print(f"🔖 Found {len(text_cols)} text columns: {text_cols}")
+
+registry = CollectorRegistry()
+gauges = {}
+
+# === CREATE ONE GAUGE PER NUMERIC COLUMN ===
+for col in numeric_cols:
+    gauges[col] = Gauge(
+        "csv_" + col,
+        f"Metric for column {col}",
+        labelnames=text_cols + ["all_data"],
+        registry=registry
+    )
+
+# === PUSH ALL ROWS ===
+for _, row in df.iterrows():
+    labels = {}
+    all_data = ",".join(str(x) for x in row.values)
+    for c in text_cols:
+        labels[c] = str(row[c])
+    labels["all_data"] = all_data
+
+    for col in numeric_cols:
+        try:
+            value = float(row[col])
+        except Exception:
+            continue  # Skip non-numeric or empty
+        gauges[col].labels(**labels).set(value)
+
+# === PUSH TO PROMETHEUS GATEWAY ===
+push_to_gateway(pushgateway_url, job=job_name, registry=registry)
+print(f"✅ Successfully pushed {len(df)} rows to Pushgateway!")
