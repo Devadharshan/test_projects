@@ -1,0 +1,53 @@
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+import pandas as pd
+
+# === CONFIG ===
+csv_file = "data.csv"
+pushgateway_url = "http://localhost:9091"   # Change if needed
+job_name = "csv_data_push"
+
+# === READ CSV ===
+df = pd.read_csv(csv_file)
+
+# === CLEAN COLUMN NAMES (safe for Prometheus) ===
+safe_col_map = {col: col.strip().lower().replace(" ", "_") for col in df.columns}
+df.rename(columns=safe_col_map, inplace=True)
+
+registry = CollectorRegistry()
+gauges = {}
+
+# === CREATE ONE GAUGE PER NUMERIC COLUMN ===
+for col in df.columns:
+    if pd.api.types.is_numeric_dtype(df[col]):
+        # Labels are all non-numeric columns + all_data
+        label_cols = [c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c])] + ["all_data"]
+        gauges[col] = Gauge(
+            "csv_" + col,
+            f"Metric for column {col}",
+            labelnames=label_cols,
+            registry=registry
+        )
+
+# === PUSH ALL ROWS ===
+for _, row in df.iterrows():
+    labels = {}
+    all_data = ",".join(str(x) for x in row.values)
+    
+    # Add all non-numeric fields as labels
+    for c in df.columns:
+        if not pd.api.types.is_numeric_dtype(df[c]):
+            labels[c] = str(row[c])
+    labels["all_data"] = all_data
+
+    # Set values for each numeric field
+    for col in df.columns:
+        if pd.api.types.is_numeric_dtype(df[col]):
+            try:
+                value = float(row[col])
+            except Exception:
+                continue  # Skip if not a valid number
+            gauges[col].labels(**labels).set(value)
+
+# === PUSH TO PROMETHEUS GATEWAY ===
+push_to_gateway(pushgateway_url, job=job_name, registry=registry)
+print("✅ All rows pushed successfully, including 'duration per thing'.")
