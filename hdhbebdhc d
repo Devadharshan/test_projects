@@ -1,0 +1,59 @@
+import os
+import sys
+import subprocess
+from datetime import datetime
+
+# === CONFIG ===
+EMAIL_FROM = "noreply@example.com"
+EMAIL_TO = "recipient@example.com"
+SMTP_SERVER = "your.mail.server.com"  # internal relay (no login needed)
+LOG_FILE = r"C:\email_log.txt"
+
+def log(message):
+    """Write logs with timestamps to file and console."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    entry = f"[{timestamp}] {message}"
+    print(entry)
+    with open(LOG_FILE, "a", encoding="utf-8") as logf:
+        logf.write(entry + "\n")
+
+def send_email(csv_path):
+    """Send email using PowerShell with CSV attachment."""
+    ps_script = f'''
+    $EmailFrom = "{EMAIL_FROM}"
+    $EmailTo = "{EMAIL_TO}"
+    $Subject = "New CSV File Received: {os.path.basename(csv_path)}"
+    $Body = "A new CSV file has been added:\n{csv_path}"
+    $SMTPServer = "{SMTP_SERVER}"
+    Send-MailMessage -From $EmailFrom -To $EmailTo -Subject $Subject -Body $Body -Attachments "{csv_path}" -SmtpServer $SMTPServer
+    '''
+    subprocess.run(["powershell", "-Command", ps_script], check=True)
+    log(f"📧 Email sent with attachment: {csv_path}")
+
+def main(folders):
+    for folder in folders:
+        if not os.path.exists(folder):
+            log(f"⚠️ Folder not found: {folder}")
+            continue
+
+        csv_files = [f for f in os.listdir(folder) if f.lower().endswith(".csv")]
+        if not csv_files:
+            log(f"ℹ️ No CSV files found in: {folder}")
+            continue
+
+        for file_name in csv_files:
+            csv_path = os.path.join(folder, file_name)
+            try:
+                send_email(csv_path)
+            except Exception as e:
+                log(f"❌ Failed to send {csv_path}: {e}")
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python send_csv_emails.py <folder1> <folder2> ...")
+        sys.exit(1)
+
+    folders_to_check = sys.argv[1:]
+    log(f"🚀 Script started for folders: {', '.join(folders_to_check)}")
+    main(folders_to_check)
+    log("✅ Script completed.")
