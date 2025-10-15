@@ -1,0 +1,33 @@
+import os
+import time
+import win32com.client
+
+# Folder to watch
+WATCH_FOLDER = r"\\NAS-SERVER\sharepath"
+
+# To track already processed files
+processed_files = set()
+
+def send_email_with_outlook(csv_path):
+    outlook = win32com.client.Dispatch("Outlook.Application")
+    mail = outlook.CreateItem(0)
+    mail.To = "receiver@example.com"
+    mail.Subject = f"New CSV File Received: {os.path.basename(csv_path)}"
+    mail.Body = f"A new CSV file has been added:\n\n{csv_path}"
+    mail.Attachments.Add(csv_path)
+    mail.Send()
+    print(f"📧 Email sent with attachment: {csv_path}")
+
+def watch_folder():
+    print(f"👀 Watching for new CSV files in: {WATCH_FOLDER}")
+    while True:
+        for file_name in os.listdir(WATCH_FOLDER):
+            if file_name.lower().endswith(".csv"):
+                full_path = os.path.join(WATCH_FOLDER, file_name)
+                if full_path not in processed_files:
+                    send_email_with_outlook(full_path)
+                    processed_files.add(full_path)
+        time.sleep(10)  # check every 10 seconds
+
+if __name__ == "__main__":
+    watch_folder()
