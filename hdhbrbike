@@ -1,0 +1,109 @@
+import os
+import zipfile
+import time
+import json
+from datetime import datetime
+import shutil
+import logging
+
+# ---------------- Logging Setup ----------------
+log_file = "archive_files.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(log_file),
+        logging.StreamHandler()
+    ]
+)
+
+# ---------------- Functions ----------------
+def get_disk_space(path):
+    """
+    Returns total, used, and free space in bytes for the given path.
+    """
+    if not os.path.exists(path):
+        logging.warning(f"Path '{path}' does not exist.")
+        return None, None, None
+    total, used, free = shutil.disk_usage(path)
+    return total, used, free
+
+def log_disk_space(path, label="Disk space"):
+    """
+    Logs disk space info for a path.
+    """
+    total, used, free = get_disk_space(path)
+    if total is not None:
+        logging.info(f"{label} for {path}: Total={total / (1024**3):.2f} GB, Used={used / (1024**3):.2f} GB, Free={free / (1024**3):.2f} GB")
+    return free
+
+def archive_old_files(folder_path, days, delete_after=True):
+    """
+    Archive each file older than `days` separately.
+    The archive name will be same as the original file (e.g. file.txt -> file.zip).
+    """
+    if not os.path.exists(folder_path):
+        logging.error(f"Folder '{folder_path}' does not exist.")
+        return
+
+    logging.info(f"\nProcessing folder: {folder_path} | Files older than {days} days")
+    free_before = log_disk_space(folder_path, "Disk space before archiving")
+
+    cutoff_time = time.time() - days * 86400  # days to seconds
+    archived_count = 0
+
+    for root, _, files in os.walk(folder_path):
+        for file in files:
+            file_path = os.path.join(root, file)
+
+            # Skip already archived .zip files
+            if file.lower().endswith(".zip"):
+                continue
+
+            # Check if file is old
+            if os.path.getmtime(file_path) < cutoff_time:
+                file_name_no_ext = os.path.splitext(file)[0]
+                archive_name = os.path.join(root, f"{file_name_no_ext}.zip")
+
+                try:
+                    with zipfile.ZipFile(archive_name, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                        arcname = os.path.basename(file_path)
+                        zipf.write(file_path, arcname)
+                        logging.info(f"Archived: {file_path} -> {archive_name}")
+
+                    if delete_after:
+                        os.remove(file_path)
+                        logging.info(f"Deleted original file: {file_path}")
+
+                    archived_count += 1
+
+                except Exception as e:
+                    logging.error(f"Error archiving {file_path}: {e}")
+
+    free_after = log_disk_space(folder_path, "Disk space after archiving")
+
+    if free_before is not None and free_after is not None:
+        freed_space = free_after - free_before
+        logging.info(f"Total space freed: {freed_space / (1024**3):.2f} GB")
+
+    logging.info(f"Completed processing for {folder_path}. Total files archived: {archived_count}\n")
+
+
+def main(config_file):
+    # Load JSON config
+    if not os.path.exists(config_file):
+        logging.error(f"Config file '{config_file}' does not exist.")
+        return
+
+    with open(config_file, 'r') as f:
+        config = json.load(f)
+
+    for location in config.get("locations", []):
+        path = location.get("path")
+        days = location.get("days", 30)  # default 30 days
+        archive_old_files(path, days)
+
+
+if __name__ == "__main__":
+    config_file = "config.json"  # path to your JSON config
+    main(config_file)
