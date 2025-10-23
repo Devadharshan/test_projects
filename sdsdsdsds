@@ -1,0 +1,110 @@
+import os
+import heapq
+import threading
+from scandir import scandir
+from concurrent.futures import ThreadPoolExecutor
+from collections import deque, defaultdict
+
+# ===== CONFIG =====
+SHARES = [
+    r"D:\data",
+    r"\\server1\share1",
+    r"\\server2\share2"
+]
+WORKERS = 16
+TOP_FILES = 30
+TOP_FOLDERS = 20
+MIN_FILE_SIZE = 1
+
+# ===== UTIL =====
+def human_size(size):
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if size < 1024:
+            return f"{size:.2f} {unit}"
+        size /= 1024
+    return f"{size:.2f} PB"
+
+
+class FastShareScanner:
+    def __init__(self, roots, workers=8):
+        self.roots = roots
+        self.workers = workers
+        self.heap = []
+        self.lock = threading.Lock()
+        self.dir_sizes = defaultdict(int)
+        self.dir_lock = threading.Lock()
+
+    def _scan_dir(self, directory, queue):
+        try:
+            for entry in scandir(directory):
+                try:
+                    if entry.is_file(follow_symlinks=False):
+                        size = entry.stat().st_size
+                        self._push_file(size, entry.path)
+                        with self.dir_lock:
+                            self.dir_sizes[directory] += size
+                    elif entry.is_dir(follow_symlinks=False):
+                        queue.append(entry.path)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _push_file(self, size, path):
+        if size < MIN_FILE_SIZE:
+            return
+        with self.lock:
+            if len(self.heap) < TOP_FILES:
+                heapq.heappush(self.heap, (size, path))
+            else:
+                if size > self.heap[0][0]:
+                    heapq.heapreplace(self.heap, (size, path))
+
+    def scan(self):
+        queue = deque([r for r in self.roots if os.path.exists(r)])
+
+        def worker():
+            while True:
+                try:
+                    d = queue.popleft()
+                except IndexError:
+                    break
+                self._scan_dir(d, queue)
+
+        with ThreadPoolExecutor(max_workers=self.workers) as ex:
+            for _ in range(self.workers):
+                ex.submit(worker)
+
+        top_files = sorted(self.heap, key=lambda x: x[0], reverse=True)
+        folder_sizes = self._aggregate_sizes()
+        return top_files, folder_sizes
+
+    def _aggregate_sizes(self):
+        sizes = dict(self.dir_sizes)
+        dirs_sorted = sorted(sizes.keys(), key=lambda p: p.count(os.sep), reverse=True)
+        for d in dirs_sorted:
+            parent = os.path.dirname(d)
+            if parent != d and parent:
+                sizes[parent] = sizes.get(parent, 0) + sizes[d]
+        result = sorted(sizes.items(), key=lambda x: x[1], reverse=True)
+        return result
+
+
+def main():
+    print(f"🚀 Scanning {len(SHARES)} shares with {WORKERS} threads...\n")
+    scanner = FastShareScanner(SHARES, WORKERS)
+    top_files, top_folders = scanner.scan()
+
+    print("📁 Top Files:")
+    for i, (size, path) in enumerate(top_files[:TOP_FILES], 1):
+        print(f"{i:3}. {human_size(size):>10}  {path}")
+
+    print("\n📂 Top Folders:")
+    for i, (path, size) in enumerate(top_folders[:TOP_FOLDERS], 1):
+        print(f"{i:3}. {human_size(size):>10}  {path}")
+
+    print("\n✅ Done!")
+
+
+if __name__ == "__main__":
+    main()
