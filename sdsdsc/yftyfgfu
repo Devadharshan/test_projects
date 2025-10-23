@@ -1,0 +1,148 @@
+import os
+import zipfile
+import time
+import json
+from datetime import datetime
+import shutil
+import logging
+
+# ---------------- Logging Setup ----------------
+log_file = "archive_files.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(log_file),
+        logging.StreamHandler()
+    ]
+)
+
+# ---------------- Functions ----------------
+def get_disk_space(path):
+    if not os.path.exists(path):
+        logging.warning(f"Path '{path}' does not exist.")
+        return None, None, None
+    total, used, free = shutil.disk_usage(path)
+    return total, used, free
+
+def log_disk_space(path, label="Disk space"):
+    total, used, free = get_disk_space(path)
+    if total is not None:
+        logging.info(f"{label} for {path}: Total={total / (1024**3):.2f} GB, Used={used / (1024**3):.2f} GB, Free={free / (1024**3):.2f} GB")
+    return free
+
+def archive_old_files(folder_path, days, include_exts=None, delete_after=True, zip_retention_days=None):
+    """
+    Archive individual files older than 'days', filter by 'include_exts'.
+    Delete original files and optionally delete zip archives older than zip_retention_days.
+    """
+    if not os.path.exists(folder_path):
+        logging.error(f"Folder '{folder_path}' does not exist.")
+        return
+
+    logging.info(f"\nProcessing folder: {folder_path} | Files older than {days} days")
+    free_before = log_disk_space(folder_path, "Disk space before archiving")
+
+    cutoff_time = time.time() - days * 86400  # include exact X days old
+    archived_count = 0
+
+    for root, _, files in os.walk(folder_path):
+        for file in files:
+            file_path = os.path.join(root, file)
+            ext = os.path.splitext(file)[1].lower()
+
+            # Skip if not in included extensions
+            if include_exts and ext not in include_exts:
+                continue
+
+            # Skip folders or files that don't meet age criteria
+            if os.path.getmtime(file_path) <= cutoff_time:
+                file_name_no_ext = os.path.splitext(file)[0]
+                archive_name = os.path.join(root, f"{file_name_no_ext}.zip")
+
+                try:
+                    with zipfile.ZipFile(archive_name, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                        arcname = os.path.basename(file_path)
+                        zipf.write(file_path, arcname)
+                        logging.info(f"Archived: {file_path} -> {archive_name}")
+
+                    if delete_after:
+                        os.remove(file_path)
+                        logging.info(f"Deleted original file: {file_path}")
+
+                    archived_count += 1
+
+                except Exception as e:
+                    logging.error(f"Error archiving {file_path}: {e}")
+
+        # Optional: Delete old zip files based on zip_retention_days
+        if zip_retention_days:
+            zip_cutoff = time.time() - zip_retention_days * 86400
+            for file in files:
+                if file.lower().endswith(".zip"):
+                    zip_path = os.path.join(root, file)
+                    if os.path.getmtime(zip_path) <= zip_cutoff:
+                        try:
+                            os.remove(zip_path)
+                            logging.info(f"Deleted old archive: {zip_path}")
+                        except Exception as e:
+                            logging.error(f"Error deleting old archive {zip_path}: {e}")
+
+    free_after = log_disk_space(folder_path, "Disk space after archiving")
+    if free_before is not None and free_after is not None:
+        freed_space = free_after - free_before
+        logging.info(f"Total space freed: {freed_space / (1024**3):.2f} GB")
+
+    logging.info(f"Completed processing for {folder_path}. Total files archived: {archived_count}\n")
+
+
+def main(config_file):
+    if not os.path.exists(config_file):
+        logging.error(f"Config file '{config_file}' does not exist.")
+        return
+
+    with open(config_file, 'r') as f:
+        config = json.load(f)
+
+    for location in config.get("locations", []):
+        path = location.get("path")
+        days = location.get("days", 30)  # default 30 days
+        include_exts = location.get("include_exts", None)
+        if include_exts:
+            include_exts = [ext.lower() if ext.startswith('.') else f".{ext.lower()}" for ext in include_exts]
+        zip_retention_days = location.get("zip_retention_days", None)
+        archive_old_files(path, days, include_exts, delete_after=True, zip_retention_days=zip_retention_days)
+
+
+if __name__ == "__main__":
+    config_file = "config.json"  # path to your JSON config
+    main(config_file)
+
+
+
+
+
+
+
+
+
+
+
+
+
+{
+    "locations": [
+        {
+            "path": "C:/share/folder1",
+            "days": 30,
+            "include_exts": ["txt", "log"], 
+            "zip_retention_days": 15
+        },
+        {
+            "path": "D:/network/share2",
+            "days": 7,
+            "include_exts": ["csv"],
+            "zip_retention_days": 7
+        }
+    ]
+}
