@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""
+fast_disk_scan.py
+
+Fast scanner for multiple shares that lists largest files and largest folders.
+- Uses threads and os.scandir for high I/O throughput.
+- Keeps only top-N files in memory using a min-heap.
+- Computes cumulative folder sizes by aggregating child directories bottom-up.
+
+Usage:
+    python fast_disk_scan.py /mnt/share1 /mnt/share2 --top-files 30 --top-folders 20 --workers 12
+
+Author: ChatGPT (GPT-5 Thinking mini)
+"""
+
+from __future__ import annotations
+import os
+import sys
+import argparse
+import threading
+import heapq
+import math
+from collections import deque, defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from typing import List, Tuple
+
+# ---------- Utilities ----------
+def human_size(n: int) -> str:
+    if n < 1024:
+        return f"{n} B"
+    for unit in ("KB", "MB", "GB", "TB", "PB"):
+        n /= 1024.0
+        if abs(n) < 1024.0:
+            return f"{n:3.2f} {unit}"
+    return f"{n:.2f} EB"
+
+# ---------- Scanner Implementation ----------
+class FastDiskScanner:
+    def __init__(self, roots: List[str], workers: int = 8, top_files: int = 50,
+                 min_size: int = 1, follow_symlinks: bool = False):
+        self.roots = [os.path.abspath(r) for r in roots]
+        self.workers = max(1, workers)
+        self.top_files_n = max(1, top_files)
+        self.min_size = max(0, min_size)
+        self.follow_symlinks = follow_symlinks
+
+        # Thread-safe structures
+        self._top_files_heap: List[Tuple[int, str]] = []  # min-heap of (size, path)
+        self._heap_lock = threading.Lock()
+
+        # immediate sizes per directory (only files directly under that dir)
+        self._dir_immediate_sizes = defaultdict(int)
+        self._dir_lock = threading.Lock()
+
+        # stats
+        self._files_count = 0
+        self._dirs_count = 0
+        self._errors = 0
+
+    def _maybe_push_file(self, size: int, path: str):
+        if size < self.min_size:
+            return
+        with self._heap_lock:
+            if len(self._top_files_heap) < self.top_files_n:
+                heapq.heappush(self._top_files_heap, (size, path))
+            else:
+                # heap[0] is smallest in heap; if current bigger, replace
+                if size > self._top_files_heap[0][0]:
+                    heapq.heapreplace(self._top_files_heap, (size, path))
+
+    def _process_dir(self, start_dir: str, dir_queue: deque):
+        """
+        Walk dir using os.scandir, push subdirs into dir_queue.
+        This function is intended to be called by multiple worker threads.
+        """
+        try:
+            with os.scandir(start_dir) as it:
+                # immediate size for this directory
+                immediate_sum = 0
+                for entry in it:
+                    try:
+                        # follow_symlinks control
+                        if entry.is_symlink():
+                            if not self.follow_symlinks:
+                                continue
+                            # else allow is_file/is_dir to follow symlink
+
+                        if entry.is_file(follow_symlinks=self.follow_symlinks):
+                            try:
+                                st = entry.stat(follow_symlinks=self.follow_symlinks)
+                                size = st.st_size
+                            except Exception:
+                                # some files may vanish or be inaccessible
+                                self._errors += 1
+                                continue
+                            immediate_sum += size
+                            self._maybe_push_file(size, entry.path)
+                            self._files_count += 1
+
+                        elif entry.is_dir(follow_symlinks=self.follow_symlinks):
+                            # push subdir for later processing
+                            dir_queue.append(entry.path)
+                            self._dirs_count += 1
+
+                        # else: skip other entry types (sockets, devices)
+                    except PermissionError:
+                        self._errors += 1
+                    except FileNotFoundError:
+                        self._errors += 1
+                    except Exception:
+                        self._errors += 1
+                if immediate_sum:
+                    with self._dir_lock:
+                        self._dir_immediate_sizes[start_dir] += immediate_sum
+        except PermissionError:
+            self._errors += 1
+        except FileNotFoundError:
+            self._errors += 1
+        except Exception:
+            self._errors += 1
+
+    def scan(self):
+        """
+        Drive scanning using a thread pool and a shared deque as work queue.
+        """
+        # prepare queue with initial roots
+        dir_queue = deque()
+        for r in self.roots:
+            if os.path.isdir(r):
+                dir_queue.append(r)
+            else:
+                # If root is a file, handle it
+                if os.path.isfile(r):
+                    try:
+                        size = os.path.getsize(r)
+                        self._maybe_push_file(size, r)
+                        parent = os.path.dirname(os.path.abspath(r))
+                        with self._dir_lock:
+                            self._dir_immediate_sizes[parent] += size
+                        self._files_count += 1
+                    except Exception:
+                        self._errors += 1
+
+        # We'll run worker threads that pop directories from the shared deque.
+        # Use a launching loop to submit tasks that keep pulling until empty.
+        stop_flag = threading.Event()
+
+        def worker_loop():
+            while not stop_flag.is_set():
+                try:
+                    start_dir = None
+                    # pop left from deque safely
+                    try:
+                        start_dir = dir_queue.popleft()
+                    except IndexError:
+                        # queue empty
+                        break
+                    # process
+                    self._process_dir(start_dir, dir_queue)
+                except Exception:
+                    # keep worker alive if possible
+                    self._errors += 1
+
+        # ThreadPoolExecutor with self.workers threads
+        with ThreadPoolExecutor(max_workers=self.workers) as ex:
+            futures = [ex.submit(worker_loop) for _ in range(self.workers)]
+            # wait for everything to finish automatically by context manager
+        # scanning done; now aggregate folder sizes
+        cumulative = self._aggregate_dir_sizes()
+        # prepare top files list (sorted desc)
+        top_files = sorted(self._top_files_heap, key=lambda x: x[0], reverse=True)
+        return {
+            "top_files": top_files,
+            "top_folders": cumulative,
+            "stats": {
+                "files_count": self._files_count,
+                "dirs_count": self._dirs_count,
+                "errors": self._errors
+            }
+        }
+
+    def _aggregate_dir_sizes(self):
+        """
+        From _dir_immediate_sizes (only immediate file sizes per directory),
+        compute cumulative sizes (include sizes of children).
+        Approach:
+          - Gather all directories we saw.
+          - Sort directories by path depth descending (process deepest first).
+          - For each dir, add its size to its parent.
+        Returns list of (size, dirpath) sorted descending.
+        """
+        # Make a copy to mutate
+        sizes = dict(self._dir_immediate_sizes)
+        # Ensure all parent directories up to roots exist in the mapping
+        # Collect all dirs
+        all_dirs = set(sizes.keys())
+        for d in list(all_dirs):
+            p = d
+            while True:
+                parent = os.path.dirname(p)
+                if not parent or parent == p:
+                    break
+                if parent not in sizes:
+                    sizes.setdefault(parent, 0)
+                p = parent
+
+        # Sort directories by depth (deepest first)
+        dirs_sorted = sorted(sizes.keys(), key=lambda p: p.count(os.sep), reverse=True)
+        for d in dirs_sorted:
+            parent = os.path.dirname(d)
+            if parent and parent != d:
+                sizes[parent] = sizes.get(parent, 0) + sizes.get(d, 0)
+
+        # Filter to only directories under the original roots (use startswith)
+        filtered = []
+        for d, s in sizes.items():
+            # only meaningful directories (non-zero or in roots)
+            if s == 0 and not any(d == r or d.startswith(r + os.sep) for r in self.roots):
+                continue
+            # ensure it's under at least one root
+            if any(d == r or d.startswith(r + os.sep) for r in self.roots):
+                filtered.append((s, d))
+        # sort descending by size
+        filtered.sort(reverse=True, key=lambda x: x[0])
+        return filtered
+
+# ---------- CLI ----------
+def parse_args():
+    p = argparse.ArgumentParser(description="Fast multi-share disk scanner (top files & folders).")
+    p.add_argument("roots", nargs="+", help="Root paths (shares) to scan")
+    p.add_argument("--top-files", type=int, default=50, help="Number of largest files to keep (default 50)")
+    p.add_argument("--top-folders", type=int, default=20, help="Number of largest folders to print (default 20)")
+    p.add_argument("--workers", type=int, default=8, help="Number of worker threads (default 8)")
+    p.add_argument("--min-size", type=int, default=1, help="Minimum file size (bytes) to consider (default 1 B)")
+    p.add_argument("--follow-symlinks", action="store_true", help="Follow symbolic links (careful with loops)")
+    return p.parse_args()
+
+def main():
+    args = parse_args()
+    scanner = FastDiskScanner(
+        roots=args.roots,
+        workers=args.workers,
+        top_files=args.top_files,
+        min_size=args.min_size,
+        follow_symlinks=args.follow_symlinks
+    )
+    print(f"Scanning roots: {', '.join(scanner.roots)} with {scanner.workers} workers...")
+    res = scanner.scan()
+    top_files = res["top_files"]
+    top_folders = res["top_folders"]
+    stats = res["stats"]
+
+    print("\n=== Top files ===")
+    for i, (size, path) in enumerate(top_files[:args.top_files], start=1):
+        print(f"{i:3d}. {human_size(size):>9}  {path}")
+
+    print("\n=== Top folders (cumulative) ===")
+    for i, (size, path) in enumerate(top_folders[:args.top_folders], start=1):
+        print(f"{i:3d}. {human_size(size):>9}  {path}")
+
+    print("\n=== Stats ===")
+    print(f"Files scanned (approx): {stats['files_count']}")
+    print(f"Directories discovered (approx): {stats['dirs_count']}")
+    print(f"Errors encountered: {stats['errors']}")
+    print("\nDone.")
+
+if __name__ == "__main__":
+    main()
