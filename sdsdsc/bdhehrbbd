@@ -1,0 +1,187 @@
+{
+    "locations": [
+        {
+            "path": "C:/share/folder1",
+            "days": 30,
+            "include_exts": ["txt", "log", "csv"],
+            "zip_retention_days": 15,
+            "archive_full_dir": false
+        },
+        {
+            "path": "D:/data/reports",
+            "days": 10,
+            "include_exts": ["csv", "json", "txt"],
+            "zip_retention_days": 7,
+            "archive_full_dir": true,
+            "dir_retention_days": 10
+        }
+    ]
+}
+
+
+
+
+
+
+import os
+import json
+import zipfile
+import shutil
+import logging
+from datetime import datetime, timedelta
+
+# -----------------------------
+# Setup Logging
+# -----------------------------
+log_filename = f"archive_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+logging.basicConfig(
+    filename=log_filename,
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+
+# -----------------------------
+# Utility Functions
+# -----------------------------
+def get_disk_space(path):
+    """Return total, used, and free space in GB."""
+    total, used, free = shutil.disk_usage(path)
+    return total / (1024 ** 3), used / (1024 ** 3), free / (1024 ** 3)
+
+def is_older_than(path, days):
+    """Check if a file or folder is older than N days."""
+    mtime = datetime.fromtimestamp(os.path.getmtime(path))
+    return (datetime.now() - mtime) > timedelta(days=days)
+
+def zip_file(file_path, archive_path):
+    """Create a zip archive of a single file."""
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+        zipf.write(file_path, os.path.basename(file_path))
+    logging.info(f"Archived file: {file_path} -> {archive_path}")
+
+def zip_directory(folder_path, archive_path, include_exts):
+    """
+    Create a zip archive of an entire directory,
+    but only include files matching given extensions.
+    """
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+        for root, _, files in os.walk(folder_path):
+            for file in files:
+                ext = file.split(".")[-1].lower() if "." in file else ""
+                if ext not in include_exts or ext == "zip":
+                    continue  # Skip unwanted extensions
+                file_path = os.path.join(root, file)
+                arcname = os.path.relpath(file_path, start=os.path.dirname(folder_path))
+                zipf.write(file_path, arcname)
+    logging.info(f"Archived directory (filtered): {folder_path} -> {archive_path}")
+
+# -----------------------------
+# Main Archiving Logic
+# -----------------------------
+def process_path(config):
+    path = config["path"]
+    days = config.get("days", 30)
+    include_exts = [ext.lower() for ext in config.get("include_exts", [])]
+    zip_retention_days = config.get("zip_retention_days", 15)
+    archive_full_dir = config.get("archive_full_dir", False)
+    dir_retention_days = config.get("dir_retention_days", 15)
+
+    logging.info(f"Processing path: {path}")
+    total_before, used_before, free_before = get_disk_space(path)
+    logging.info(f"Disk space before: Total={total_before:.2f}GB, Used={used_before:.2f}GB, Free={free_before:.2f}GB")
+
+    archived_count = 0
+    deleted_zips = 0
+
+    if not os.path.exists(path):
+        logging.warning(f"Path not found: {path}")
+        return
+
+    # ----------------------------------------------------
+    # Option 1: Archive complete directories (filtered)
+    # ----------------------------------------------------
+    if archive_full_dir:
+        for root, dirs, _ in os.walk(path):
+            for dir_name in dirs:
+                dir_path = os.path.join(root, dir_name)
+                if is_older_than(dir_path, days):
+                    archive_name = f"{dir_name}.zip"
+                    archive_path = os.path.join(root, archive_name)
+
+                    try:
+                        zip_directory(dir_path, archive_path, include_exts)
+                        shutil.rmtree(dir_path)
+                        archived_count += 1
+                        logging.info(f"Deleted original directory: {dir_path}")
+                    except Exception as e:
+                        logging.error(f"Failed to archive directory {dir_path}: {e}")
+
+        # Delete old directory zips
+        for root, _, files in os.walk(path):
+            for f in files:
+                if f.endswith(".zip"):
+                    file_path = os.path.join(root, f)
+                    if is_older_than(file_path, dir_retention_days):
+                        os.remove(file_path)
+                        deleted_zips += 1
+                        logging.info(f"Deleted old directory zip: {file_path}")
+
+    # ----------------------------------------------------
+    # Option 2: Archive individual files
+    # ----------------------------------------------------
+    else:
+        for root, _, files in os.walk(path):
+            for file_name in files:
+                file_path = os.path.join(root, file_name)
+                ext = file_name.split(".")[-1].lower() if "." in file_name else ""
+
+                # Skip already zipped or excluded extensions
+                if ext not in include_exts or ext == "zip":
+                    continue
+
+                if is_older_than(file_path, days):
+                    archive_name = f"{os.path.splitext(file_name)[0]}.zip"
+                    archive_path = os.path.join(root, archive_name)
+                    try:
+                        zip_file(file_path, archive_path)
+                        os.remove(file_path)
+                        archived_count += 1
+                        logging.info(f"Deleted original file: {file_path}")
+                    except Exception as e:
+                        logging.error(f"Failed to archive file {file_path}: {e}")
+
+        # Delete old file-level zips
+        for root, _, files in os.walk(path):
+            for f in files:
+                if f.endswith(".zip"):
+                    file_path = os.path.join(root, f)
+                    if is_older_than(file_path, zip_retention_days):
+                        os.remove(file_path)
+                        deleted_zips += 1
+                        logging.info(f"Deleted old zip: {file_path}")
+
+    # ----------------------------------------------------
+    # Log disk space after cleanup
+    # ----------------------------------------------------
+    total_after, used_after, free_after = get_disk_space(path)
+    freed = free_after - free_before
+    logging.info(f"Disk space after: Total={total_after:.2f}GB, Used={used_after:.2f}GB, Free={free_after:.2f}GB")
+    logging.info(f"Space freed: {freed:.2f}GB | Files/Dirs archived: {archived_count} | Old zips deleted: {deleted_zips}")
+
+# -----------------------------
+# Entry Point
+# -----------------------------
+def main():
+    try:
+        with open("archive_config.json", "r") as f:
+            config_data = json.load(f)
+        for loc in config_data.get("locations", []):
+            process_path(loc)
+        logging.info("Archiving process completed successfully.")
+    except Exception as e:
+        logging.error(f"Error reading configuration or processing paths: {e}")
+
+if __name__ == "__main__":
+    main()
+
+
