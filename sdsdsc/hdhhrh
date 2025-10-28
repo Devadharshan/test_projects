@@ -1,0 +1,61 @@
+import os
+import time
+import pandas as pd
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# === CONFIG ===
+CSV_FOLDER = "./csv_files"
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "csv_data_push"
+
+def load_and_push(csv_path, metric_name):
+    df = pd.read_csv(csv_path)
+
+    # Normalize column names to Prometheus-safe
+    df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+
+    # Identify label columns (all columns)
+    label_columns = list(df.columns)
+    label_columns.append("file_name")
+    label_columns.append("push_time")
+
+    registry = CollectorRegistry()
+
+    gauge = Gauge(
+        metric_name,
+        f"Data from {metric_name}",
+        labelnames=label_columns,
+        registry=registry
+    )
+
+    push_ts = str(int(time.time()))
+    file_name = os.path.basename(csv_path)
+
+    for _, row in df.iterrows():
+        labels = {col: str(row[col]) for col in df.columns}
+        labels["file_name"] = file_name
+        labels["push_time"] = push_ts
+
+        # Value is always 1 → representing a data row
+        gauge.labels(**labels).set(1)
+
+    push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+    print(f"✅ Pushed file → {file_name} into {metric_name}")
+
+def run():
+    for file in os.listdir(CSV_FOLDER):
+        if not file.lower().endswith(".csv"):
+            continue
+
+        full_path = os.path.join(CSV_FOLDER, file)
+
+        # Summary files contain "summary" in name
+        if "summary" in file.lower():
+            load_and_push(full_path, "csv_summary_data")
+        else:
+            load_and_push(full_path, "csv_main_data")
+
+    print("\n🎉 Completed pushing all CSV data!")
+
+if __name__ == "__main__":
+    run()
