@@ -1,0 +1,89 @@
+import os
+import time
+import pandas as pd
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# === CONFIG ===
+CSV_FOLDER = "./csv_files"
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "csv_data_push"
+
+def normalize_numeric(value):
+    if pd.isna(value):
+        return None
+    try:
+        cleaned = str(value).replace(",", "").replace("ms", "").replace("s", "").strip()
+        return float(cleaned)
+    except:
+        return None
+
+def push_csv_to_prometheus(csv_path):
+    print(f"\n📂 Processing: {csv_path}")
+
+    df = pd.read_csv(csv_path)
+    df.columns = [col.strip().lower().replace(" ", "_") for col in df.columns]
+
+    for col in df.columns:
+        df[col] = df[col].apply(normalize_numeric).where(df[col].apply(normalize_numeric).notna(), df[col])
+
+    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    text_cols = [c for c in df.columns if c not in numeric_cols]
+
+    print(f"  🔢 Numeric columns: {numeric_cols}")
+    print(f"  🔖 Label columns: {text_cols}")
+
+    registry = CollectorRegistry()
+    gauges = {}
+
+    # Add file_name label always
+    text_cols.append("file_name")
+
+    # === NEW METRICS ===
+    pushed_time_metric = Gauge(
+        "csv_push_timestamp",
+        "Timestamp when this CSV file was pushed",
+        labelnames=["file_name"],
+        registry=registry
+    )
+
+    file_processed_metric = Gauge(
+        "csv_file_processed",
+        "Indicator that this file was processed (1 = processed)",
+        labelnames=["file_name"],
+        registry=registry
+    )
+
+    # Create gauges for numeric columns
+    for col in numeric_cols:
+        gauges[col] = Gauge(
+            "csv_" + col,
+            f"Metric for column {col}",
+            labelnames=text_cols,
+            registry=registry
+        )
+
+    # Push row data
+    for _, row in df.iterrows():
+        labels = {c: str(row[c]) for c in text_cols if c != "file_name"}
+        labels["file_name"] = os.path.basename(csv_path)
+
+        for col in numeric_cols:
+            val = normalize_numeric(row[col])
+            if val is None:
+                continue
+            gauges[col].labels(**labels).set(val)
+
+    # === SET NEW METRICS ===
+    file_name = os.path.basename(csv_path)
+    pushed_time_metric.labels(file_name).set(time.time())   # Unix timestamp
+    file_processed_metric.labels(file_name).set(1)
+
+    push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+    print(f"✅ Pushed: {file_name} ({len(df)} rows)")
+
+
+if __name__ == "__main__":
+    for file in os.listdir(CSV_FOLDER):
+        if file.lower().endswith(".csv"):
+            push_csv_to_prometheus(os.path.join(CSV_FOLDER, file))
+    print("\n🎉 All CSV files processed and pushed successfully!")
