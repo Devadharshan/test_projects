@@ -1,0 +1,15 @@
+from datetime import datetime
+
+push_time = Gauge("app_data_push_timestamp", "Last push timestamp (epoch seconds)", registry=registry)
+
+push_info = Gauge(
+    "app_data_push_info",
+    "Push metadata including readable timestamp",
+    ["timestamp_human"],
+    registry=registry
+)
+
+now = time.time()
+push_time.set(now)
+
+push_info.labels(datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S")).set(1)
