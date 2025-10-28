@@ -1,0 +1,73 @@
+import os
+import time
+import pandas as pd
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# === CONFIG ===
+DIRECTORY = "/path/to/csv/folder"   # Change this
+PUSHGATEWAY_URL = "http://localhost:9091"  # Change this if needed
+JOB_NAME = "csv_data_push"
+
+registry = CollectorRegistry()
+
+# Gauges (value always = 1; data stored as labels)
+main_metric = Gauge(
+    "app_main_row_info",
+    "Row level data from main CSV files",
+    labelnames=["filename"],  # we will dynamically add others per file
+    registry=registry
+)
+
+summary_metric = Gauge(
+    "app_summary_row_info",
+    "Row level data from summary CSV files",
+    labelnames=["filename"],
+    registry=registry
+)
+
+push_time = Gauge("app_data_push_timestamp", "Last push timestamp", registry=registry)
+processed_file = Gauge("app_processed_files_info", "Processed files", ["filename"], registry=registry)
+
+def sanitize(col):
+    return col.strip().lower().replace(" ", "_").replace("-", "_")
+
+for file in os.listdir(DIRECTORY):
+    if not file.lower().endswith(".csv"):
+        continue
+
+    filepath = os.path.join(DIRECTORY, file)
+    df = pd.read_csv(filepath)
+    processed_file.labels(filename=file).set(1)
+
+    # Convert everything to string to use as label values
+    df = df.fillna("").astype(str)
+
+    # Normalize column names to Prometheus label safe names
+    df.columns = [sanitize(c) for c in df.columns]
+
+    # Determine if summary file (based on expected fields)
+    cols = df.columns.tolist()
+    is_summary = (
+        "job_details" in cols and
+        "average_duration" in cols and
+        "total_trades" in cols and
+        "jobcount" in cols
+    )
+
+    target_metric = summary_metric if is_summary else main_metric
+
+    # Update gauge labelnames dynamically to match column set
+    target_metric._labelnames = ["filename"] + df.columns.tolist()
+
+    for _, row in df.iterrows():
+        label_values = {"filename": file}
+        for c in df.columns:
+            label_values[c] = row[c]  # store every field as label
+
+        target_metric.labels(**label_values).set(1)
+
+# Record push time
+push_time.set(int(time.time()))
+
+push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+print("✅ Successfully pushed all rows & columns to Pushgateway")
