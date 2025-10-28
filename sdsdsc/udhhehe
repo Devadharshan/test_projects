@@ -1,0 +1,95 @@
+import os
+import time
+import pandas as pd
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# CONFIG
+DIRECTORY = "/path/to/csv/folder"
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "csv_data_push"
+
+registry = CollectorRegistry()
+
+# Metrics
+main_gauge = Gauge(
+    "app_main_data_info",
+    "Main CSV data",
+    ["bp_name", "thread_id", "job_id", "job_details", "filename"],
+    registry=registry
+)
+
+summary_gauge = Gauge(
+    "app_summary_data_info",
+    "Summary CSV data",
+    ["job_details", "filename"],
+    registry=registry
+)
+
+files_gauge = Gauge(
+    "app_processed_files_info",
+    "List of processed files",
+    ["filename"],
+    registry=registry
+)
+
+push_time_gauge = Gauge(
+    "app_data_push_timestamp",
+    "Timestamp of last data push",
+    registry=registry
+)
+
+# Process files
+for file in os.listdir(DIRECTORY):
+    if not file.endswith(".csv"):
+        continue
+
+    filepath = os.path.join(DIRECTORY, file)
+    df = pd.read_csv(filepath)
+
+    # Normalize column names for comparison only (don’t change original values)
+    cols = [c.strip().lower() for c in df.columns]
+
+    # Detect **Summary File**
+    if set(["job details", "average duration", "total trades", "jobcount"]).issubset(cols):
+        for _, row in df.iterrows():
+            job_details = str(row["job Details"]).strip()
+
+            avg_duration = float(row["Average Duration"])
+
+            summary_gauge.labels(
+                job_details=job_details,
+                filename=file
+            ).set(avg_duration)
+
+        # record file presence
+        files_gauge.labels(filename=file).set(1)
+        continue
+
+    # Detect **Main File**
+    if set(["bp name", "thread id", "job id", "durationpertrade", "jobdetails"]).issubset(cols):
+        for _, row in df.iterrows():
+            bp_name = str(row["BP NAME"]).strip()
+            thread_id = str(row["Thread ID"]).strip()
+            job_id = str(row["JOB ID"]).strip()
+            job_details = str(row["JobDetails"]).strip()
+
+            duration_per_trade = float(row["DurationPerTrade"])
+
+            main_gauge.labels(
+                bp_name=bp_name,
+                thread_id=thread_id,
+                job_id=job_id,
+                job_details=job_details,
+                filename=file
+            ).set(duration_per_trade)
+
+        files_gauge.labels(filename=file).set(1)
+        continue
+
+# Push timestamp metric
+push_time_gauge.set(time.time())
+
+# PUSH TO GATEWAY
+push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+
+print("✅ Data push complete")
