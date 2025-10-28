@@ -1,3 +1,29 @@
+
+{
+  "locations": [
+    {
+      "path": "/path/to/share",
+      "days": 7,
+      "include_exts": ["txt", "log", "csv"],
+      "archive_full_dir": true,
+      "dir_retention_days": 30,
+      "zip_retention_days": 15,
+      "archive_destination": "same" 
+    },
+    {
+      "path": "/path/to/other_share",
+      "days": 30,
+      "include_exts": ["log", "txt"],
+      "archive_full_dir": false,
+      "zip_retention_days": 60,
+      "archive_destination": "/path/to/central_archive"
+    }
+  ]
+}
+
+
+
+
 #!/usr/bin/env python3
 """
 smart_archiver_final.py
