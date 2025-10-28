@@ -1,0 +1,58 @@
+import os
+import time
+import pandas as pd
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+DIRECTORY = "/path/to/csv/folder"
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "csv_data_push"
+
+registry = CollectorRegistry()
+
+# Metric for Main Files
+main_metric = Gauge(
+    "app_main_row_info",
+    "Row level data from main CSV files",
+    labelnames=["filename"] + ["col_" + str(i) for i in range(50)],
+    registry=registry
+)
+
+# Metric for Summary Files
+summary_metric = Gauge(
+    "app_summary_row_info",
+    "Row level data from summary CSV files",
+    labelnames=["filename"] + ["col_" + str(i) for i in range(50)],
+    registry=registry
+)
+
+# Push time marker
+push_time = Gauge("app_data_push_timestamp", "Last push timestamp", registry=registry)
+
+# Process files
+for file in os.listdir(DIRECTORY):
+    if not file.endswith(".csv"):
+        continue
+
+    filepath = os.path.join(DIRECTORY, file)
+    df = pd.read_csv(filepath)
+
+    # Convert ALL values to strings for label use
+    df = df.fillna("").astype(str)
+
+    # Prepare label rows (max 50 columns padded)
+    for _, row in df.iterrows():
+        labels = [file] + row.values.tolist()
+        if len(labels) < 51:
+            labels += [""] * (51 - len(labels))  # pad to consistent length
+
+        if any(k.lower() in df.columns.str.lower() for k in ["average duration", "jobcount", "total trades"]):
+            summary_metric.labels(*labels[:51]).set(1)
+        else:
+            main_metric.labels(*labels[:51]).set(1)
+
+# Push timestamp
+push_time.set(int(time.time()))
+
+# Push to gateway
+push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+print("✅ All data successfully pushed (including text fields)")
