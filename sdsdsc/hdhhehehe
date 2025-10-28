@@ -1,0 +1,62 @@
+import os
+import pandas as pd
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# === CONFIG ===
+CSV_FOLDER = "./csv_files"   # Folder containing multiple CSV files
+PUSHGATEWAY_URL = "http://localhost:9091"  # Change if needed
+JOB_NAME = "csv_data_push"
+
+def push_csv_to_prometheus(csv_path):
+    print(f"\n📂 Processing: {csv_path}")
+
+    df = pd.read_csv(csv_path)
+
+    # Normalize column names → Prometheus safe
+    safe_col_map = {col: col.strip().lower().replace(" ", "_") for col in df.columns}
+    df.rename(columns=safe_col_map, inplace=True)
+
+    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    text_cols = [c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c])]
+
+    print(f"  🔢 Numeric columns: {numeric_cols}")
+    print(f"  🔖 Label columns: {text_cols}")
+
+    registry = CollectorRegistry()
+    gauges = {}
+
+    # Add filename label always (important for grafana grouping)
+    text_cols.append("file_name")
+
+    # Create a gauge per numeric column
+    for col in numeric_cols:
+        gauges[col] = Gauge(
+            "csv_" + col,
+            f"Metric for column {col}",
+            labelnames=text_cols,
+            registry=registry
+        )
+
+    # Push each row
+    for _, row in df.iterrows():
+        labels = {c: str(row[c]) for c in text_cols if c != "file_name"}
+        labels["file_name"] = os.path.basename(csv_path)
+
+        for col in numeric_cols:
+            try:
+                value = float(row[col])
+            except:
+                continue
+            gauges[col].labels(**labels).set(value)
+
+    push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+    print(f"✅ Pushed {len(df)} rows to PushGateway for file: {os.path.basename(csv_path)}")
+
+
+# === MAIN ===
+if __name__ == "__main__":
+    for file in os.listdir(CSV_FOLDER):
+        if file.lower().endswith(".csv"):
+            push_csv_to_prometheus(os.path.join(CSV_FOLDER, file))
+
+    print("\n🎉 All CSV files processed and pushed successfully!")
