@@ -1,0 +1,26 @@
+import logging
+import sys
+import os
+
+def setup_logging(config):
+    log_dir = config.get("log_directory", None)
+
+    if log_dir:
+        log_dir = os.path.abspath(log_dir)
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, "archive_script.log")
+
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s - %(levelname)s - %(message)s",
+            handlers=[
+                logging.FileHandler(log_file, encoding="utf-8"),
+                logging.StreamHandler(sys.stdout)    # ← Goes to STDOUT for Autosys
+            ]
+        )
+    else:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s - %(levelname)s - %(message)s",
+            handlers=[logging.StreamHandler(sys.stdout)]
+        )
