@@ -1,0 +1,26 @@
+def setup_logging(config):
+    log_dir = config.get("log_directory", None)
+
+    if log_dir:
+        log_dir = os.path.abspath(log_dir)
+        safe_makedirs(log_dir)
+
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        log_file = os.path.join(log_dir, f"smart_archiver_{timestamp}.log")
+
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(message)s",
+            handlers=[
+                logging.FileHandler(log_file, encoding="utf-8"),
+                logging.StreamHandler(sys.stdout)  # <-- STDOUT for Autosys .out
+            ]
+        )
+        logging.info(f"Logging → {log_file}")
+
+    else:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(message)s",
+            handlers=[logging.StreamHandler(sys.stdout)]
+        )
