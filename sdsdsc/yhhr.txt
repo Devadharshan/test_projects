@@ -1,0 +1,34 @@
+Project Summary – Automated File & Folder Archival for Space Cleanup
+
+We have a requirement to clear space across multiple Windows shared drives and directories.
+Large volumes of log files, CSVs, and dated application output folders accumulate over time, consuming storage and impacting performance.
+
+To address this, we implemented an automated archival and cleanup solution that runs through an Autosys scheduled job, which calls a Python archival script.
+This script intelligently identifies old data, archives it, and removes it based on rules defined in a configuration file.
+
+⸻
+
+Solution Overview
+
+The solution consists of:
+	1.	Autosys Job
+	•	Runs on a schedule (daily / weekly as needed)
+	•	Executes the Python archival script automatically
+	•	Provides logging and monitoring support
+	2.	Python Archival Script
+	•	Reads a JSON configuration describing:
+	•	Multiple directories to process
+	•	Retention days
+	•	File extensions to include
+	•	Whether to archive individual files or entire dated folders
+	•	ZIP retention period (when archived ZIPs should be deleted)
+	•	Traverses subfolders recursively
+	•	Archives eligible data into ZIP files
+	•	Deletes original files/folders after archiving
+	•	Removes old ZIP files based on cleanup policy
+	•	Logs all actions to a centralized log directory
+	3.	Configurable JSON File
+	•	Supports multiple locations
+	•	Allows custom rules per directory
+	•	Ensures no executable files (exe/dll/zip) are re-zipped
+	•	Prevents accidental archiving of system or active data
