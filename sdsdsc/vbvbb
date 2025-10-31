@@ -1,0 +1,336 @@
+#!/usr/bin/env python3
+"""
+compare_bp_trends.py
+
+Scans a directory for BP CSV files and summary CSVs, parses date from filename (YYYY-MM-DD),
+aggregates metrics for last 7, 30, and 90 days, grouped by BP NAME + JobDetails (main) and Job Details (summary),
+and prints results to console/log.
+
+Assumptions:
+- Main files (not summary) have filename containing YYYY-MM-DD, e.g. filebp3_prodlon_2025-10-31.csv
+- Summary files contain '_summary' in the filename and the date, e.g. filebp3_prodlon_2025-10-31_summary.csv
+- Main file required columns (case-insensitive): BP NAME, Thread ID, JOB ID, Start Time, End Time, Duration, No of trades, DurationPerTrade, JobDetails
+- Summary file header (exact as provided): "Job Details,Average Duration,Total Trades,Job Count"
+- Duration and DurationPerTrade are numeric (floats)
+"""
+
+import os
+import re
+import argparse
+import logging
+from datetime import datetime, timedelta
+import pandas as pd
+import sys
+
+# ---------- Logging ----------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+
+# ---------- Helpers ----------
+DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+
+def find_date_in_filename(filename):
+    m = DATE_RE.search(filename)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1), "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+def canonicalize_columns(df):
+    # Map columns to lowercase stripped keys for robust access
+    df = df.rename(columns={c: c.strip() for c in df.columns})
+    lower_map = {c: c.strip().lower().replace(" ", ""): c for c in df.columns}
+    return df, lower_map
+
+def safe_read_csv(path):
+    try:
+        return pd.read_csv(path)
+    except Exception as e:
+        logging.error(f"Failed to read CSV {path}: {e}")
+        return None
+
+# ---------- Aggregation functions ----------
+def aggregate_main_df(df, group_keys):
+    """
+    Expects df to contain:
+      - BP NAME, JobDetails, JOB ID, Duration, No of trades, DurationPerTrade
+    Returns aggregated DataFrame grouped by group_keys.
+    """
+    # canonicalize
+    df, colmap = canonicalize_columns(df)
+
+    # helpers to find correct column names (best-effort)
+    def find_col(possible_names):
+        for name in possible_names:
+            key = name.strip().lower().replace(" ", "")
+            if key in colmap:
+                return colmap[key]
+        return None
+
+    bp_col = find_col(["BP NAME", "BPNAME", "bpname", "bp name"])
+    jobdetails_col = find_col(["JobDetails", "Job Details", "jobdetails", "job details"])
+    jobid_col = find_col(["JOB ID", "JOBID", "jobid", "job id"])
+    duration_col = find_col(["Duration", "duration"])
+    notrades_col = find_col(["No of trades", "NoOfTrades", "nooftrades", "trades", "no_of_trades"])
+    duration_per_trade_col = find_col(["DurationPerTrade", "Duration Per Trade", "durationpertrade", "duration per trade", "duration_per_trade"])
+
+    missing = []
+    for name, col in [
+        ("BP NAME", bp_col),
+        ("JobDetails", jobdetails_col),
+        ("JOB ID", jobid_col),
+        ("Duration", duration_col),
+        ("No of trades", notrades_col),
+        ("DurationPerTrade", duration_per_trade_col),
+    ]:
+        if col is None:
+            missing.append(name)
+    if missing:
+        logging.warning(f"Main file missing expected columns (best-effort): {missing}. Aggregation may fail or be incomplete.")
+
+    # Ensure numeric conversions where possible
+    if duration_col:
+        df[duration_col] = pd.to_numeric(df[duration_col], errors="coerce")
+    if notrades_col:
+        df[notrades_col] = pd.to_numeric(df[notrades_col], errors="coerce").fillna(0).astype(int)
+    if duration_per_trade_col:
+        df[duration_per_trade_col] = pd.to_numeric(df[duration_per_trade_col], errors="coerce")
+
+    # Build groupby keys if present
+    present_group_keys = [k for k in group_keys if k in df.columns or k.lower().replace(" ", "") in colmap]
+    # Map provided group_keys to actual columns if necessary
+    mapped_keys = []
+    for k in group_keys:
+        keycanon = k.strip().lower().replace(" ", "")
+        if keycanon in colmap:
+            mapped_keys.append(colmap[keycanon])
+        elif k in df.columns:
+            mapped_keys.append(k)
+    if not mapped_keys:
+        logging.error("No valid grouping columns found in main data. Aborting main aggregation.")
+        return pd.DataFrame()
+
+    # Do aggregation
+    aggs = {}
+    if notrades_col:
+        aggs[notrades_col] = "sum"
+    if duration_col:
+        aggs[duration_col] = "sum"
+    if duration_per_trade_col:
+        aggs[duration_per_trade_col] = "mean"
+    if jobid_col:
+        # job count via nunique
+        aggs[jobid_col] = pd.Series.nunique
+
+    grouped = df.groupby(mapped_keys).agg(aggs).reset_index()
+    # Rename columns for clarity
+    rename_map = {}
+    if notrades_col:
+        rename_map[notrades_col] = "Total_Trades"
+    if duration_col:
+        rename_map[duration_col] = "Total_Duration"
+    if duration_per_trade_col:
+        rename_map[duration_per_trade_col] = "Avg_DurationPerTrade"
+    if jobid_col:
+        rename_map[jobid_col] = "JobCount"
+
+    grouped = grouped.rename(columns=rename_map)
+    return grouped
+
+def aggregate_summary_df(df):
+    """
+    Expects summary df to have columns:
+      Job Details, Average Duration, Total Trades, Job Count
+    Returns aggregated (grouped by Job Details) with mean/sum as appropriate.
+    """
+    df, colmap = canonicalize_columns(df)
+    # find actual column names
+    jd_col = None
+    avgcol = None
+    total_trades_col = None
+    jobcount_col = None
+    for k, v in colmap.items():
+        if k == "jobdetails" or k == "jobdetails" or "jobdetails" in k or "jobdetails" == k:
+            # attempt to detect job details variants
+            pass
+    # Use explicit mapping based on provided header "Job Details,Average Duration,Total Trades,Job Count"
+    # safe lookup:
+    def lookup(names):
+        for name in names:
+            key = name.strip().lower().replace(" ", "")
+            if key in colmap:
+                return colmap[key]
+        return None
+
+    jd_col = lookup(["Job Details", "JobDetails", "jobdetails", "job details"])
+    avgcol = lookup(["Average Duration", "AverageDuration", "AvgDuration", "averageduration"])
+    total_trades_col = lookup(["Total Trades", "TotalTrades", "totaltrades", "trades", "total_trades"])
+    jobcount_col = lookup(["Job Count", "JobCount", "jobcount", "count", "job_count"])
+
+    missing = [n for n,c in [
+        ("Job Details", jd_col),
+        ("Average Duration", avgcol),
+        ("Total Trades", total_trades_col),
+        ("Job Count", jobcount_col)
+    ] if c is None]
+    if missing:
+        logging.warning(f"Summary file missing expected columns: {missing}. Aggregation may be incomplete.")
+
+    if avgcol:
+        df[avgcol] = pd.to_numeric(df[avgcol], errors="coerce")
+    if total_trades_col:
+        df[total_trades_col] = pd.to_numeric(df[total_trades_col], errors="coerce").fillna(0)
+    if jobcount_col:
+        df[jobcount_col] = pd.to_numeric(df[jobcount_col], errors="coerce").fillna(0)
+
+    group_col = jd_col if jd_col else (df.columns[0] if len(df.columns) > 0 else None)
+    if group_col is None:
+        logging.error("Cannot find a grouping column for summary aggregation.")
+        return pd.DataFrame()
+
+    aggs = {}
+    if avgcol:
+        aggs[avgcol] = "mean"
+    if total_trades_col:
+        aggs[total_trades_col] = "sum"
+    if jobcount_col:
+        aggs[jobcount_col] = "sum"
+
+    grouped = df.groupby(group_col).agg(aggs).reset_index()
+    # rename
+    rename_map = {}
+    if avgcol:
+        rename_map[avgcol] = "Avg_AverageDuration"
+    if total_trades_col:
+        rename_map[total_trades_col] = "Sum_TotalTrades"
+    if jobcount_col:
+        rename_map[jobcount_col] = "Sum_JobCount"
+    grouped = grouped.rename(columns=rename_map)
+    return grouped
+
+# ---------- Main driver ----------
+def process_directory(target_dir, ranges_days=[7,30,90]):
+    target_dir = os.path.abspath(target_dir)
+    logging.info(f"Processing directory: {target_dir}")
+
+    # list CSVs
+    files = [f for f in os.listdir(target_dir) if f.lower().endswith(".csv")]
+    if not files:
+        logging.warning("No CSV files found in directory.")
+        return
+
+    main_files = []
+    summary_files = []
+    for f in files:
+        if "_summary" in f.lower():
+            d = find_date_in_filename(f)
+            if d:
+                summary_files.append((f, d))
+        else:
+            d = find_date_in_filename(f)
+            if d:
+                main_files.append((f, d))
+
+    if not main_files and not summary_files:
+        logging.warning("No date-stamped main or summary files detected.")
+        return
+
+    # Build DataFrames keyed by file_date
+    main_records = []
+    for fname, fdate in main_files:
+        path = os.path.join(target_dir, fname)
+        df = safe_read_csv(path)
+        if df is None:
+            continue
+        df["_file_date"] = pd.to_datetime(fdate)
+        df["_source_file"] = fname
+        main_records.append(df)
+    if main_records:
+        main_all = pd.concat(main_records, ignore_index=True, sort=False)
+    else:
+        main_all = pd.DataFrame()
+
+    summary_records = []
+    for fname, fdate in summary_files:
+        path = os.path.join(target_dir, fname)
+        df = safe_read_csv(path)
+        if df is None:
+            continue
+        df["_file_date"] = pd.to_datetime(fdate)
+        df["_source_file"] = fname
+        summary_records.append(df)
+    if summary_records:
+        summary_all = pd.concat(summary_records, ignore_index=True, sort=False)
+    else:
+        summary_all = pd.DataFrame()
+
+    today = datetime.now().date()
+
+    # For each requested range compute aggregates
+    for days in ranges_days:
+        start_date = today - timedelta(days=days-1)  # include today as day 0 -> last N days inclusive
+        logging.info(f"\n\n===== Summary for last {days} days (from {start_date} to {today}) =====")
+
+        # MAIN FILES AGGREGATION
+        if not main_all.empty:
+            # filter by file date
+            mask = (main_all["_file_date"].dt.date >= start_date) & (main_all["_file_date"].dt.date <= today)
+            filtered_main = main_all.loc[mask].copy()
+            if filtered_main.empty:
+                logging.info("No main files fall in this range.")
+            else:
+                # group by BP NAME + JobDetails
+                grouped_main = aggregate_main_df(filtered_main, ["BP NAME", "JobDetails"])
+                if grouped_main.empty:
+                    logging.info("Main aggregation produced no rows (missing columns?).")
+                else:
+                    logging.info(f"Main aggregates (grouped by BP NAME + JobDetails) for last {days} days:")
+                    # display pretty
+                    print("\n---- MAIN AGGREGATION ----")
+                    print(grouped_main.to_string(index=False))
+        else:
+            logging.info("No main data available to aggregate.")
+
+        # SUMMARY FILES AGGREGATION
+        if not summary_all.empty:
+            mask2 = (summary_all["_file_date"].dt.date >= start_date) & (summary_all["_file_date"].dt.date <= today)
+            filtered_summary = summary_all.loc[mask2].copy()
+            if filtered_summary.empty:
+                logging.info("No summary files fall in this range.")
+            else:
+                grouped_summary = aggregate_summary_df(filtered_summary)
+                if grouped_summary.empty:
+                    logging.info("Summary aggregation produced no rows (missing columns?).")
+                else:
+                    logging.info(f"Summary aggregates (grouped by Job Details) for last {days} days:")
+                    print("\n---- SUMMARY AGGREGATION ----")
+                    print(grouped_summary.to_string(index=False))
+        else:
+            logging.info("No summary data available to aggregate.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Compare BP main and summary CSVs across date ranges (7/30/90 days).")
+    parser.add_argument("--dir", "-d", dest="dirpath", help="Directory containing main & summary CSVs. If omitted, you'll be prompted.")
+    args = parser.parse_args()
+
+    if args.dirpath:
+        target_dir = args.dirpath
+    else:
+        target_dir = input("Enter directory path containing CSVs: ").strip()
+
+    if not os.path.exists(target_dir) or not os.path.isdir(target_dir):
+        logging.error(f"Provided path is not a directory or doesn't exist: {target_dir}")
+        sys.exit(1)
+
+    # runs for 7,30,90
+    process_directory(target_dir, ranges_days=[7,30,90])
+
+
+if __name__ == "__main__":
+    main()
