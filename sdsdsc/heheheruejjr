@@ -1,0 +1,58 @@
+{
+  "title": "BP Job Performance Dashboard",
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Avg Duration (Main Data)",
+      "targets": [
+        { "expr": "avg(bp_job_duration_seconds{bp=~\"$bp\"})" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Total Trades (Main Data)",
+      "targets": [
+        { "expr": "sum(bp_job_trade_count{bp=~\"$bp\"})" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Duration Per Trade Trend",
+      "targets": [
+        { "expr": "bp_job_avg_duration_seconds{bp=~\"$bp\"}" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Summary - Avg Duration",
+      "targets": [
+        { "expr": "avg(bp_summary_avg_duration{bp=~\"$bp\"})" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Summary - Total Trades",
+      "targets": [
+        { "expr": "sum(bp_summary_total_trades{bp=~\"$bp\"})" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Summary - Job Count",
+      "targets": [
+        { "expr": "sum(bp_summary_job_count{bp=~\"$bp\"})" }
+      ]
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "bp",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(bp_job_duration_seconds, bp)",
+        "includeAll": true
+      }
+    ]
+  }
+}
