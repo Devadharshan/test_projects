@@ -1,0 +1,165 @@
+import os
+import re
+import sys
+import pandas as pd
+import logging
+from datetime import datetime, timedelta
+from pathlib import Path
+
+# ---- CONFIGURE THESE ----
+BASE_DIR = r"D:\Data\BPReports"   # folder containing files
+LOG_DIR = r"D:\Logs\BPAnalysis"   # folder where log files will be written
+OUTPUT_FILE = r"D:\Reports\bp_analysis_output.xlsx"
+# -------------------------
+
+# Ensure paths exist
+os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
+
+# Logging setup
+timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+log_file = os.path.join(LOG_DIR, f"bp_analysis_{timestamp}.log")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(log_file, encoding="utf-8"),
+        logging.StreamHandler(sys.stdout)  # print to stdout (Autosys requirement)
+    ]
+)
+
+logging.info("Starting BP file analysis...")
+
+# Regex to extract date from filename
+date_pattern = re.compile(r"(\d{4}-\d{2}-\d{2})")
+
+def extract_date(filename):
+    match = date_pattern.search(filename)
+    if match:
+        try:
+            return datetime.strptime(match.group(1), "%Y-%m-%d").date()
+        except:
+            return None
+    return None
+
+# Collect files
+files = [f for f in os.listdir(BASE_DIR) if f.endswith(".csv")]
+logging.info(f"Found {len(files)} CSV files.")
+
+main_files = []
+summary_files = []
+
+for f in files:
+    if "summary" in f.lower():
+        summary_files.append(f)
+    else:
+        main_files.append(f)
+
+logging.info(f"Main files: {len(main_files)}  |  Summary files: {len(summary_files)}")
+
+# Convert to dict with detected dates
+def map_files(file_list):
+    mapped = []
+    for fname in file_list:
+        fdate = extract_date(fname)
+        if fdate:
+            mapped.append((fname, fdate))
+        else:
+            logging.warning(f"Skipping file (no date found): {fname}")
+    return mapped
+
+main_files = map_files(main_files)
+summary_files = map_files(summary_files)
+
+today = datetime.now().date()
+
+def filter_by_days(file_list, days):
+    return [(f, d) for (f, d) in file_list if today - d <= timedelta(days=days)]
+
+windows = {
+    "Today": filter_by_days(main_files, 0),
+    "Last 3 Days": filter_by_days(main_files, 3),
+    "Last 7 Days": filter_by_days(main_files, 7),
+    "Last 30 Days": filter_by_days(main_files, 30)
+}
+
+# ---- READ & PROCESS MAIN FILES ----
+def load_main_data(file_entries):
+    dfs = []
+    for fname, _ in file_entries:
+        df = pd.read_csv(os.path.join(BASE_DIR, fname))
+        df["source_file"] = fname
+        dfs.append(df)
+    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+
+def aggregate_main(df):
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    df['Duration'] = pd.to_numeric(df['Duration'], errors='coerce')
+    df['No of trades'] = pd.to_numeric(df['No of trades'], errors='coerce')
+    df['DurationPerTrade'] = pd.to_numeric(df['DurationPerTrade'], errors='coerce')
+
+    grp_bp = df.groupby("BP NAME").agg(
+        Avg_Duration=("Duration", "mean"),
+        Total_Trades=("No of trades", "sum"),
+        Avg_DurationPerTrade=("DurationPerTrade", "mean")
+    ).reset_index()
+
+    grp_job = df.groupby("JobDetails").agg(
+        Avg_Duration=("Duration", "mean"),
+        Total_Trades=("No of trades", "sum"),
+        Avg_DurationPerTrade=("DurationPerTrade", "mean")
+    ).reset_index()
+
+    return grp_bp, grp_job
+
+# ---- READ & PROCESS SUMMARY FILES ----
+def load_summary_data(file_entries):
+    dfs = []
+    for fname, _ in file_entries:
+        df = pd.read_csv(os.path.join(BASE_DIR, fname))
+        df["source_file"] = fname
+        dfs.append(df)
+    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+
+def aggregate_summary(df):
+    if df.empty:
+        return pd.DataFrame()
+    df['Average Duration'] = pd.to_numeric(df['Average Duration'], errors='coerce')
+    df['Total Trades'] = pd.to_numeric(df['Total Trades'], errors='coerce')
+    df['Job Count'] = pd.to_numeric(df['Job Count'], errors='coerce')
+
+    return df.groupby("Job Details").agg(
+        Avg_of_Avg_Duration=("Average Duration", "mean"),
+        Total_Trades=("Total Trades", "sum"),
+        Total_Job_Count=("Job Count", "sum")
+    ).reset_index()
+
+# ---- BUILD ANALYSIS RESULT ----
+writer = pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl")
+
+for label, entries in windows.items():
+    logging.info(f"Processing window: {label}")
+
+    main_data = load_main_data(entries)
+    main_bp, main_job = aggregate_main(main_data)
+
+    main_bp.to_excel(writer, sheet_name=f"{label}_main_bp", index=False)
+    main_job.to_excel(writer, sheet_name=f"{label}_main_job", index=False)
+
+    # Summary for same date range
+    summary_subset = [(f, d) for (f, d) in summary_files if (f, d) in entries]
+    summary_data = load_summary_data(summary_subset)
+    summary_agg = aggregate_summary(summary_data)
+
+    summary_agg.to_excel(writer, sheet_name=f"{label}_summary", index=False)
+
+    pd.DataFrame(entries, columns=["filename", "date"])\
+        .to_excel(writer, sheet_name=f"{label}_files", index=False)
+
+writer.close()
+
+logging.info(f"Report generated: {OUTPUT_FILE}")
+logging.info(f"Log file: {log_file}")
+logging.info("Done ✅")
