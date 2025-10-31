@@ -1,0 +1,281 @@
+"""
+push_bp_metrics.py
+
+Usage:
+    python push_bp_metrics.py --dir "C:\\path\\to\\csvs" --pushgateway http://pushgateway:9091
+
+What it does:
+ - Reads all CSV files in the given directory.
+ - Distinguishes summary files by filename containing '_summary'.
+ - Pushes per-row metrics to Pushgateway under job names:
+     - bp_metrics (the raw per-file metrics)
+     - bp_tracker (aggregated daily metrics per job_details / bp/thread)
+ - Adds labels: file_name, file_date (from filename), push_time (human readable Asia/Kolkata)
+"""
+
+import os
+import csv
+import re
+import argparse
+from datetime import datetime, timezone
+try:
+    # python 3.9+
+    from zoneinfo import ZoneInfo
+    KOLKATA = ZoneInfo("Asia/Kolkata")
+except Exception:
+    # fallback: use local timezone
+    KOLKATA = datetime.now().astimezone().tzinfo
+
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# ---------- CONFIG ----------
+SUMMARY_MARK = "_summary"
+# Metric name prefixes
+NS = "bp"  # namespace prefix
+# ---------- END CONFIG ----------
+
+FNAME_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")  # finds 2025-10-31 in filename
+
+
+def extract_date_from_filename(fn):
+    m = FNAME_DATE_RE.search(fn)
+    return m.group(1) if m else ""
+
+
+def human_push_time():
+    return datetime.now(tz=KOLKATA).strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def push_metrics_to_gateway(pushgateway, registry, job_name, grouping_key=None):
+    # Using pushadd so metrics aggregate (if you want overwrite use push_to_gateway with 'push' method).
+    push_to_gateway(pushgateway, job=job_name, registry=registry, grouping_key=grouping_key or {})
+
+
+def parse_non_summary_row(row):
+    # Expect columns:
+    # BP NAME,Thread ID,JOB ID,Start Time,End Time,Duration,No of trades,DurationPerTrade,JobDetails
+    # we'll normalize keys (strip)
+    return {
+        'bp_name': row.get('BP NAME', row.get('BP NAME'.lower(), '')).strip(),
+        'thread_id': row.get('Thread ID', row.get('Thread ID'.lower(), '')).strip(),
+        'job_id': row.get('JOB ID', row.get('JOB ID'.lower(), '')).strip(),
+        'start_time': row.get('Start Time', '').strip(),
+        'end_time': row.get('End Time', '').strip(),
+        'duration': safe_float(row.get('Duration', 0)),
+        'no_of_trades': safe_float(row.get('No of trades', row.get('No of Trades', 0))),
+        'duration_per_trade': safe_float(row.get('DurationPerTrade', row.get('DurationPerTrade'.lower(), 0))),
+        'job_details': row.get('JobDetails', row.get('Job Details', '')).strip()
+    }
+
+
+def parse_summary_row(row):
+    # Expect columns: Job Details,Average Duration,Total trades,JobCount
+    return {
+        'job_details': row.get('Job Details', row.get('JobDetails', '')).strip(),
+        'average_duration': safe_float(row.get('Average Duration', row.get('AverageDuration', 0))),
+        'total_trades': safe_float(row.get('Total trades', row.get('TotalTrades', 0))),
+        'job_count': safe_float(row.get('JobCount', row.get('Job Count', 0)))
+    }
+
+
+def safe_float(x):
+    try:
+        if x is None:
+            return 0.0
+        if isinstance(x, (int, float)):
+            return float(x)
+        s = str(x).strip()
+        if s == "":
+            return 0.0
+        # remove commas
+        s = s.replace(",", "")
+        return float(s)
+    except Exception:
+        return 0.0
+
+
+def read_csv_rows(filepath):
+    # returns list of dict rows (column header -> value)
+    rows = []
+    with open(filepath, newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            rows.append(r)
+    return rows
+
+
+def push_raw_metrics_for_file(filepath, pushgateway, registry_labels_extra=None):
+    """
+    Pushes metrics from a single file to Pushgateway under job 'bp_metrics'.
+    registry_labels_extra: dict of additional grouping_key labels to attach to pushgateway call (optional)
+    """
+    fname = os.path.basename(filepath)
+    file_date = extract_date_from_filename(fname)
+    push_time = human_push_time()
+
+    rows = read_csv_rows(filepath)
+    is_summary = SUMMARY_MARK in fname
+
+    registry = CollectorRegistry()
+
+    # common labels for all metrics from this file
+    common_labels = ['file_name', 'file_date', 'push_time']
+
+    if is_summary:
+        # summary metrics
+        g_avg = Gauge(f"{NS}_summary_average_duration_seconds",
+                      "Average duration from summary file (seconds)",
+                      common_labels + ['job_details'], registry=registry)
+        g_total_trades = Gauge(f"{NS}_summary_total_trades",
+                               "Total trades from summary file",
+                               common_labels + ['job_details'], registry=registry)
+        g_job_count = Gauge(f"{NS}_summary_job_count",
+                            "Job count from summary file",
+                            common_labels + ['job_details'], registry=registry)
+
+        for row in rows:
+            parsed = parse_summary_row(row)
+            labels = [fname, file_date, push_time, parsed['job_details']]
+            g_avg.labels(*labels).set(parsed['average_duration'])
+            g_total_trades.labels(*labels).set(parsed['total_trades'])
+            g_job_count.labels(*labels).set(parsed['job_count'])
+
+    else:
+        # non-summary metrics
+        g_duration = Gauge(f"{NS}_non_summary_duration_seconds",
+                           "Duration of job run (seconds)",
+                           common_labels + ['bp_name', 'thread_id', 'job_id', 'job_details'], registry=registry)
+        g_trades = Gauge(f"{NS}_non_summary_no_of_trades",
+                         "No of trades in this run",
+                         common_labels + ['bp_name', 'thread_id', 'job_id', 'job_details'], registry=registry)
+        g_duration_per_trade = Gauge(f"{NS}_non_summary_duration_per_trade_seconds",
+                                     "Duration per trade (seconds)",
+                                     common_labels + ['bp_name', 'thread_id', 'job_id', 'job_details'], registry=registry)
+
+        for row in rows:
+            parsed = parse_non_summary_row(row)
+            labels = [fname, file_date, push_time,
+                      parsed['bp_name'], parsed['thread_id'], parsed['job_id'], parsed['job_details']]
+            g_duration.labels(*labels).set(parsed['duration'])
+            g_trades.labels(*labels).set(parsed['no_of_trades'])
+            g_duration_per_trade.labels(*labels).set(parsed['duration_per_trade'])
+
+    # push to gateway (grouping by file to keep things organized)
+    grouping = {'file': fname}
+    if registry_labels_extra:
+        grouping.update(registry_labels_extra)
+
+    push_metrics_to_gateway(pushgateway, registry, job_name="bp_metrics", grouping_key=grouping)
+    print(f"Pushed raw metrics for {fname} -> bp_metrics (rows: {len(rows)})")
+
+
+def build_and_push_tracker_metrics(all_filepaths, pushgateway):
+    """
+    Build aggregated daily tracker metrics and push under job 'bp_tracker'.
+    Aggregation logic:
+     - For summary files: aggregate per (job_details, file_date) -> sum(total_trades), avg(average_duration), sum(job_count)
+     - For non-summary: aggregate per (job_details, bp_name, thread_id, file_date) -> avg(duration), sum(no_of_trades), avg(duration_per_trade)
+    """
+
+    # maps to collect aggregates
+    summary_agg = {}  # (file_date, job_details) -> {'sum_trades':..., 'sum_avg_duration':..., 'count_avg':..., 'sum_job_count':...}
+    non_summary_agg = {}  # (file_date, job_details, bp_name, thread_id) -> {'sum_trades':..., 'sum_duration':..., 'count':..., 'sum_dpt':...}
+
+    for fp in all_filepaths:
+        fname = os.path.basename(fp)
+        file_date = extract_date_from_filename(fname) or "unknown"
+        rows = read_csv_rows(fp)
+        if SUMMARY_MARK in fname:
+            for r in rows:
+                p = parse_summary_row(r)
+                key = (file_date, p['job_details'])
+                rec = summary_agg.setdefault(key, {'sum_trades': 0.0, 'sum_avg_duration': 0.0, 'count_avg': 0.0, 'sum_job_count': 0.0})
+                rec['sum_trades'] += p['total_trades']
+                rec['sum_avg_duration'] += p['average_duration']
+                rec['count_avg'] += 1
+                rec['sum_job_count'] += p['job_count']
+        else:
+            for r in rows:
+                p = parse_non_summary_row(r)
+                key = (file_date, p['job_details'], p['bp_name'], p['thread_id'])
+                rec = non_summary_agg.setdefault(key, {'sum_trades': 0.0, 'sum_duration': 0.0, 'count': 0.0, 'sum_dpt': 0.0})
+                rec['sum_trades'] += p['no_of_trades']
+                rec['sum_duration'] += p['duration']
+                rec['sum_dpt'] += p['duration_per_trade']
+                rec['count'] += 1
+
+    # Now push aggregated metrics
+    registry = CollectorRegistry()
+    push_time = human_push_time()
+
+    # Summary tracker gauges
+    g_sum_total_trades = Gauge(f"{NS}_tracker_summary_total_trades",
+                               "Daily total trades for job_details (aggregated from summary files)",
+                               ['file_date', 'job_details', 'push_time'], registry=registry)
+    g_sum_avg_duration = Gauge(f"{NS}_tracker_summary_avg_of_avg_duration_seconds",
+                               "Daily average (of Average Duration column) for job_details (seconds)",
+                               ['file_date', 'job_details', 'push_time'], registry=registry)
+    g_sum_job_count = Gauge(f"{NS}_tracker_summary_job_count",
+                            "Daily sum of JobCount for job_details",
+                            ['file_date', 'job_details', 'push_time'], registry=registry)
+
+    for (file_date, job_details), rec in summary_agg.items():
+        avg_of_avg = rec['sum_avg_duration'] / rec['count_avg'] if rec['count_avg'] else 0.0
+        g_sum_total_trades.labels(file_date, job_details, push_time).set(rec['sum_trades'])
+        g_sum_avg_duration.labels(file_date, job_details, push_time).set(avg_of_avg)
+        g_sum_job_count.labels(file_date, job_details, push_time).set(rec['sum_job_count'])
+
+    # Non-summary tracker gauges
+    g_ns_avg_duration = Gauge(f"{NS}_tracker_non_summary_avg_duration_seconds",
+                              "Daily avg duration for bp/thread/job_details",
+                              ['file_date', 'job_details', 'bp_name', 'thread_id', 'push_time'], registry=registry)
+    g_ns_total_trades = Gauge(f"{NS}_tracker_non_summary_total_trades",
+                              "Daily sum of trades for bp/thread/job_details",
+                              ['file_date', 'job_details', 'bp_name', 'thread_id', 'push_time'], registry=registry)
+    g_ns_avg_dpt = Gauge(f"{NS}_tracker_non_summary_avg_duration_per_trade_seconds",
+                         "Daily avg duration per trade for bp/thread/job_details",
+                         ['file_date', 'job_details', 'bp_name', 'thread_id', 'push_time'], registry=registry)
+
+    for (file_date, job_details, bp_name, thread_id), rec in non_summary_agg.items():
+        avg_dur = rec['sum_duration'] / rec['count'] if rec['count'] else 0.0
+        avg_dpt = rec['sum_dpt'] / rec['count'] if rec['count'] else 0.0
+        g_ns_avg_duration.labels(file_date, job_details, bp_name, thread_id, push_time).set(avg_dur)
+        g_ns_total_trades.labels(file_date, job_details, bp_name, thread_id, push_time).set(rec['sum_trades'])
+        g_ns_avg_dpt.labels(file_date, job_details, bp_name, thread_id, push_time).set(avg_dpt)
+
+    push_metrics_to_gateway(pushgateway, registry, job_name="bp_tracker", grouping_key={'type': 'daily_tracker'})
+    print(f"Pushed tracker metrics -> bp_tracker (summary keys: {len(summary_agg)}, non-summary keys: {len(non_summary_agg)})")
+
+
+def main(directory, pushgateway):
+    # find all CSV files
+    all_files = []
+    for f in os.listdir(directory):
+        if f.lower().endswith(".csv"):
+            all_files.append(os.path.join(directory, f))
+
+    if not all_files:
+        print("No CSV files found in", directory)
+        return
+
+    # push raw metrics per file
+    for fp in all_files:
+        try:
+            push_raw_metrics_for_file(fp, pushgateway)
+        except Exception as e:
+            print(f"Error pushing raw metrics for {fp}: {e}")
+
+    # push aggregated tracker metrics
+    try:
+        build_and_push_tracker_metrics(all_files, pushgateway)
+    except Exception as e:
+        print("Error building/pushing tracker metrics:", e)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Push BP CSV metrics to Pushgateway")
+    parser.add_argument("--dir", required=True, help="Directory containing CSV files")
+    parser.add_argument("--pushgateway", required=True, help="Pushgateway URL, e.g. http://localhost:9091")
+    args = parser.parse_args()
+
+    main(args.dir, args.pushgateway)
