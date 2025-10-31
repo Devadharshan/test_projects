@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+import os
+import re
+import pandas as pd
+from datetime import datetime, timedelta
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# --------------------
+# CONFIG
+# --------------------
+DIRECTORY = r"D:\bp_files"   # <--- CHANGE THIS PATH
+PUSHGATEWAY_URL = "http://localhost:9091"  # <--- CHANGE THIS IF NEEDED
+
+# Time Windows to Evaluate
+PERIODS = {
+    "today": 0,
+    "last3": 3,
+    "last7": 7,
+    "last30": 30
+}
+
+# Filename pattern → extract date
+DATE_REGEX = re.compile(r".*_(\d{4}-\d{2}-\d{2})\.csv$")
+
+
+# --------------------
+# HELPERS
+# --------------------
+def extract_date_from_filename(filename):
+    m = DATE_REGEX.match(filename)
+    if m:
+        try:
+            return datetime.strptime(m.group(1), "%Y-%m-%d").date()
+        except:
+            return None
+    return None
+
+
+def load_files(directory):
+    main_files = []
+    summary_files = []
+
+    for f in os.listdir(directory):
+        if not f.endswith(".csv"):
+            continue
+        full = os.path.join(directory, f)
+
+        if f.endswith("_summary.csv"):
+            summary_files.append(full)
+        else:
+            main_files.append(full)
+
+    return main_files, summary_files
+
+
+def group_by_period(file_list):
+    today = datetime.now().date()
+    grouped = {key: [] for key in PERIODS.keys()}
+
+    for f in file_list:
+        d = extract_date_from_filename(os.path.basename(f))
+        if not d:
+            continue
+
+        diff = (today - d).days
+
+        for period, days in PERIODS.items():
+            if diff <= days:
+                grouped[period].append(f)
+
+    return grouped
+
+
+# --------------------
+# METRIC PUSH
+# --------------------
+def push_metrics(period, metrics, metric_type):
+    registry = CollectorRegistry()
+
+    for name, value in metrics.items():
+        g = Gauge(f"bp_{metric_type}_{name}", f"{metric_type} metric {name}", ["period"], registry=registry)
+        g.labels(period).set(value)
+
+    push_to_gateway(PUSHGATEWAY_URL, job=f"bp_metrics_{period}", registry=registry)
+
+
+# --------------------
+# PROCESS MAIN FILES
+# --------------------
+def process_main(files):
+    if not files:
+        return None
+
+    df_all = pd.concat((pd.read_csv(f) for f in files), ignore_index=True)
+
+    # Expected columns:
+    # BP NAME, Thread ID, JOB ID, Start Time, End Time, Duration, No of trades, DurationPerTrade, JobDetails
+
+    metrics = {
+        "duration_avg": df_all["Duration"].mean(),
+        "duration_max": df_all["Duration"].max(),
+        "trades_sum": df_all["No of trades"].sum(),
+        "trade_rate": df_all["DurationPerTrade"].mean()
+    }
+
+    return metrics
+
+
+# --------------------
+# PROCESS SUMMARY FILES
+# --------------------
+def process_summary(files):
+    if not files:
+        return None
+
+    df_all = pd.concat((pd.read_csv(f) for f in files), ignore_index=True)
+
+    # Expected columns:
+    # Job Details, Average Duration, Total Trades, JobCount
+
+    metrics = {
+        "avg_of_avg_duration": df_all["Average Duration"].mean(),
+        "total_trades": df_all["Total Trades"].sum(),
+        "total_job_count": df_all["JobCount"].sum()
+    }
+
+    return metrics
+
+
+# --------------------
+# MAIN LOGIC
+# --------------------
+def main():
+    print("[INFO] Loading files...")
+    main_files, summary_files = load_files(DIRECTORY)
+
+    print("[INFO] Grouping by period...")
+    main_grouped = group_by_period(main_files)
+    summary_grouped = group_by_period(summary_files)
+
+    for period in PERIODS.keys():
+        print(f"[INFO] Processing period: {period}")
+
+        # MAIN METRICS
+        main_metrics = process_main(main_grouped[period])
+        if main_metrics:
+            print(f"[INFO] Pushing MAIN metrics → {period}")
+            push_metrics(period, main_metrics, "main")
+
+        # SUMMARY METRICS
+        summary_metrics = process_summary(summary_grouped[period])
+        if summary_metrics:
+            print(f"[INFO] Pushing SUMMARY metrics → {period}")
+            push_metrics(period, summary_metrics, "summary")
+
+    print("[INFO] Completed metric push.")
+
+
+if __name__ == "__main__":
+    main()
