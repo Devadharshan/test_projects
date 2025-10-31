@@ -1,0 +1,422 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "BP Data Trend dashboard — summary and non-summary metrics, daily push cadence",
+  "editable": true,
+  "gnetId": null,
+  "graphTooltip": 0,
+  "id": null,
+  "iteration": 1698732000000,
+  "links": [],
+  "panels": [
+    {
+      "type": "row",
+      "title": "SUMMARY METRICS - Job level",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "panels": [],
+      "id": 100
+    },
+
+    {
+      "type": "timeseries",
+      "title": "Summary: Average Duration (avg / min / max / sum) - selected job",
+      "datasource": "prometheus",
+      "targets": [
+        {
+          "expr": "avg(bp_summary_metrics{job_details=\"$jobDetails\", metric=\"average_duration\"})",
+          "legendFormat": "avg",
+          "refId": "A"
+        },
+        {
+          "expr": "min_over_time(bp_summary_metrics{job_details=\"$jobDetails\", metric=\"average_duration\"}[1d])",
+          "legendFormat": "min",
+          "refId": "B"
+        },
+        {
+          "expr": "max_over_time(bp_summary_metrics{job_details=\"$jobDetails\", metric=\"average_duration\"}[1d])",
+          "legendFormat": "max",
+          "refId": "C"
+        },
+        {
+          "expr": "sum_over_time(bp_summary_metrics{job_details=\"$jobDetails\", metric=\"average_duration\"}[1d])",
+          "legendFormat": "sum",
+          "refId": "D"
+        }
+      ],
+      "uid": "summary_avg_duration",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "id": 1,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single" }
+      }
+    },
+
+    {
+      "type": "timeseries",
+      "title": "Summary: Total Trades (avg / min / max / sum) - selected job",
+      "datasource": "prometheus",
+      "targets": [
+        {
+          "expr": "avg(bp_summary_metrics{job_details=\"$jobDetails\", metric=\"total_trades\"})",
+          "legendFormat": "avg",
+          "refId": "A"
+        },
+        {
+          "expr": "min_over_time(bp_summary_metrics{job_details=\"$jobDetails\", metric=\"total_trades\"}[1d])",
+          "legendFormat": "min",
+          "refId": "B"
+        },
+        {
+          "expr": "max_over_time(bp_summary_metrics{job_details=\"$jobDetails\", metric=\"total_trades\"}[1d])",
+          "legendFormat": "max",
+          "refId": "C"
+        },
+        {
+          "expr": "sum_over_time(bp_summary_metrics{job_details=\"$jobDetails\", metric=\"total_trades\"}[1d])",
+          "legendFormat": "sum",
+          "refId": "D"
+        }
+      ],
+      "uid": "summary_total_trades",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "id": 2,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single" }
+      }
+    },
+
+    {
+      "type": "timeseries",
+      "title": "Summary: Job Count (avg / min / max / sum) - selected job",
+      "datasource": "prometheus",
+      "targets": [
+        {
+          "expr": "avg(bp_summary_metrics{job_details=\"$jobDetails\", metric=\"job_count\"})",
+          "legendFormat": "avg",
+          "refId": "A"
+        },
+        {
+          "expr": "min_over_time(bp_summary_metrics{job_details=\"$jobDetails\", metric=\"job_count\"}[1d])",
+          "legendFormat": "min",
+          "refId": "B"
+        },
+        {
+          "expr": "max_over_time(bp_summary_metrics{job_details=\"$jobDetails\", metric=\"job_count\"}[1d])",
+          "legendFormat": "max",
+          "refId": "C"
+        },
+        {
+          "expr": "sum_over_time(bp_summary_metrics{job_details=\"$jobDetails\", metric=\"job_count\"}[1d])",
+          "legendFormat": "sum",
+          "refId": "D"
+        }
+      ],
+      "uid": "summary_job_count",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 9 },
+      "id": 3,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single" }
+      }
+    },
+
+    {
+      "type": "row",
+      "title": "SUMMARY - Time windows",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 },
+      "panels": [],
+      "id": 200
+    },
+
+    {
+      "type": "stat",
+      "title": "Summary - Average Duration Yesterday",
+      "datasource": "prometheus",
+      "targets": [
+        {
+          "expr": "avg_over_time(bp_summary_metrics{job_details=\"$jobDetails\", metric=\"average_duration\"}[24h] offset 1d)",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 18 },
+      "id": 4
+    },
+
+    {
+      "type": "stat",
+      "title": "Summary - Average Duration Last 7d",
+      "datasource": "prometheus",
+      "targets": [
+        {
+          "expr": "avg_over_time(bp_summary_metrics{job_details=\"$jobDetails\", metric=\"average_duration\"}[7d])",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 18 },
+      "id": 5
+    },
+
+    {
+      "type": "stat",
+      "title": "Summary - Average Duration Last 30d",
+      "datasource": "prometheus",
+      "targets": [
+        {
+          "expr": "avg_over_time(bp_summary_metrics{job_details=\"$jobDetails\", metric=\"average_duration\"}[30d])",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 18 },
+      "id": 6
+    },
+
+    {
+      "type": "stat",
+      "title": "Summary - Average Duration Today",
+      "datasource": "prometheus",
+      "targets": [
+        {
+          "expr": "avg(bp_summary_metrics{job_details=\"$jobDetails\", metric=\"average_duration\"})",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 18 },
+      "id": 7
+    },
+
+    {
+      "type": "row",
+      "title": "NON-SUMMARY METRICS - Per BP / Thread",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+      "panels": [],
+      "id": 300
+    },
+
+    {
+      "type": "timeseries",
+      "title": "Non-summary: Duration (avg / min / max / sum) - filters",
+      "datasource": "prometheus",
+      "targets": [
+        {
+          "expr": "avg(bp_details_metrics{job_details=\"$jobDetails\", bp_name=\"$bpName\", thread_id=\"$threadId\", metric=\"duration\"})",
+          "legendFormat": "avg",
+          "refId": "A"
+        },
+        {
+          "expr": "min_over_time(bp_details_metrics{job_details=\"$jobDetails\", bp_name=\"$bpName\", thread_id=\"$threadId\", metric=\"duration\"}[1d])",
+          "legendFormat": "min",
+          "refId": "B"
+        },
+        {
+          "expr": "max_over_time(bp_details_metrics{job_details=\"$jobDetails\", bp_name=\"$bpName\", thread_id=\"$threadId\", metric=\"duration\"}[1d])",
+          "legendFormat": "max",
+          "refId": "C"
+        },
+        {
+          "expr": "sum_over_time(bp_details_metrics{job_details=\"$jobDetails\", bp_name=\"$bpName\", thread_id=\"$threadId\", metric=\"duration\"}[1d])",
+          "legendFormat": "sum",
+          "refId": "D"
+        }
+      ],
+      "uid": "ns_duration",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
+      "id": 8,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single" }
+      }
+    },
+
+    {
+      "type": "timeseries",
+      "title": "Non-summary: No of Trades (avg / min / max / sum) - filters",
+      "datasource": "prometheus",
+      "targets": [
+        {
+          "expr": "avg(bp_details_metrics{job_details=\"$jobDetails\", bp_name=\"$bpName\", thread_id=\"$threadId\", metric=\"no_of_trades\"})",
+          "legendFormat": "avg",
+          "refId": "A"
+        },
+        {
+          "expr": "min_over_time(bp_details_metrics{job_details=\"$jobDetails\", bp_name=\"$bpName\", thread_id=\"$threadId\", metric=\"no_of_trades\"}[1d])",
+          "legendFormat": "min",
+          "refId": "B"
+        },
+        {
+          "expr": "max_over_time(bp_details_metrics{job_details=\"$jobDetails\", bp_name=\"$bpName\", thread_id=\"$threadId\", metric=\"no_of_trades\"}[1d])",
+          "legendFormat": "max",
+          "refId": "C"
+        },
+        {
+          "expr": "sum_over_time(bp_details_metrics{job_details=\"$jobDetails\", bp_name=\"$bpName\", thread_id=\"$threadId\", metric=\"no_of_trades\"}[1d])",
+          "legendFormat": "sum",
+          "refId": "D"
+        }
+      ],
+      "uid": "ns_trades",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 23 },
+      "id": 9,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single" }
+      }
+    },
+
+    {
+      "type": "timeseries",
+      "title": "Non-summary: DurationPerTrade (avg / min / max / sum) - filters",
+      "datasource": "prometheus",
+      "targets": [
+        {
+          "expr": "avg(bp_details_metrics{job_details=\"$jobDetails\", bp_name=\"$bpName\", thread_id=\"$threadId\", metric=\"duration_per_trade\"})",
+          "legendFormat": "avg",
+          "refId": "A"
+        },
+        {
+          "expr": "min_over_time(bp_details_metrics{job_details=\"$jobDetails\", bp_name=\"$bpName\", thread_id=\"$threadId\", metric=\"duration_per_trade\"}[1d])",
+          "legendFormat": "min",
+          "refId": "B"
+        },
+        {
+          "expr": "max_over_time(bp_details_metrics{job_details=\"$jobDetails\", bp_name=\"$bpName\", thread_id=\"$threadId\", metric=\"duration_per_trade\"}[1d])",
+          "legendFormat": "max",
+          "refId": "C"
+        },
+        {
+          "expr": "sum_over_time(bp_details_metrics{job_details=\"$jobDetails\", bp_name=\"$bpName\", thread_id=\"$threadId\", metric=\"duration_per_trade\"}[1d])",
+          "legendFormat": "sum",
+          "refId": "D"
+        }
+      ],
+      "uid": "ns_dpt",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 31 },
+      "id": 10,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single" }
+      }
+    },
+
+    {
+      "type": "row",
+      "title": "NON-SUMMARY - Time windows",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 39 },
+      "panels": [],
+      "id": 400
+    },
+
+    {
+      "type": "stat",
+      "title": "NS: Duration Yesterday",
+      "datasource": "prometheus",
+      "targets": [
+        {
+          "expr": "avg_over_time(bp_details_metrics{job_details=\"$jobDetails\", bp_name=\"$bpName\", thread_id=\"$threadId\", metric=\"duration\"}[24h] offset 1d)",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 40 },
+      "id": 11
+    },
+
+    {
+      "type": "stat",
+      "title": "NS: Duration Last 7d",
+      "datasource": "prometheus",
+      "targets": [
+        {
+          "expr": "avg_over_time(bp_details_metrics{job_details=\"$jobDetails\", bp_name=\"$bpName\", thread_id=\"$threadId\", metric=\"duration\"}[7d])",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 40 },
+      "id": 12
+    },
+
+    {
+      "type": "stat",
+      "title": "NS: Duration Last 30d",
+      "datasource": "prometheus",
+      "targets": [
+        {
+          "expr": "avg_over_time(bp_details_metrics{job_details=\"$jobDetails\", bp_name=\"$bpName\", thread_id=\"$threadId\", metric=\"duration\"}[30d])",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 40 },
+      "id": 13
+    },
+
+    {
+      "type": "stat",
+      "title": "NS: Duration Today",
+      "datasource": "prometheus",
+      "targets": [
+        {
+          "expr": "avg(bp_details_metrics{job_details=\"$jobDetails\", bp_name=\"$bpName\", thread_id=\"$threadId\", metric=\"duration\"})",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 40 },
+      "id": 14
+    }
+  ],
+  "schemaVersion": 36,
+  "style": "dark",
+  "tags": ["bp", "summary", "non-summary", "daily"],
+  "templating": {
+    "list": [
+      {
+        "name": "jobDetails",
+        "type": "query",
+        "label": "Job Details",
+        "datasource": "prometheus",
+        "query": "label_values(bp_summary_metrics, job_details)",
+        "refresh": 1,
+        "includeAll": true,
+        "multi": false,
+        "allValue": ""
+      },
+      {
+        "name": "bpName",
+        "type": "query",
+        "label": "BP Name",
+        "datasource": "prometheus",
+        "query": "label_values(bp_details_metrics, bp_name)",
+        "refresh": 1,
+        "includeAll": true,
+        "multi": false,
+        "allValue": ""
+      },
+      {
+        "name": "threadId",
+        "type": "query",
+        "label": "Thread ID",
+        "datasource": "prometheus",
+        "query": "label_values(bp_details_metrics{bp_name=\"$bpName\"}, thread_id)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": false,
+        "allValue": ""
+      }
+    ]
+  },
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": ["5s", "10s", "30s", "1m", "5m", "15m", "30m", "1h", "6h", "12h", "24h"],
+    "time_options": ["Today", "Yesterday", "7d", "30d", "90d", "6M", "1y"]
+  },
+  "title": "BP Data Trend",
+  "uid": "bp-data-trend",
+  "version": 1
+}
