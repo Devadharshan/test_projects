@@ -1,0 +1,241 @@
+"""
+push_combined_bp_metrics.py
+
+Combines all CSVs in a directory and pushes:
+ - All NON-SUMMARY rows combined -> job "bp_non_summary"
+ - All SUMMARY rows combined     -> job "bp_summary"
+
+Usage:
+    python push_combined_bp_metrics.py --dir "C:\\path\\to\\csvs" --pushgateway http://pushgateway:9091
+
+Requirements:
+    pip install prometheus_client
+
+Notes:
+ - Keeps labels: file_name, file_date (YYYY-MM-DD extracted from filename), push_time (Asia/Kolkata)
+ - Non-summary labels: bp_name, thread_id, job_id, start_time, end_time, job_details
+ - Non-summary metrics: duration_seconds, no_of_trades, duration_per_trade_seconds
+ - Summary labels: job_details
+ - Summary metrics: average_duration_seconds, total_trades, job_count
+ - All label values are sanitized to safe strings for Prometheus labels.
+"""
+
+import os
+import csv
+import re
+import argparse
+from datetime import datetime, timezone
+try:
+    from zoneinfo import ZoneInfo
+    KOLKATA = ZoneInfo("Asia/Kolkata")
+except Exception:
+    # fallback: system local tz
+    KOLKATA = datetime.now().astimezone().tzinfo
+
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# Constants
+SUMMARY_MARK = "_summary"
+NS = "bp"  # namespace prefix for metric names
+
+FNAME_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")  # find YYYY-MM-DD in filename
+
+
+def extract_date_from_filename(fn):
+    m = FNAME_DATE_RE.search(fn)
+    return m.group(1) if m else ""
+
+
+def human_push_time():
+    return datetime.now(tz=KOLKATA).strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def safe_float(x):
+    try:
+        if x is None:
+            return 0.0
+        if isinstance(x, (int, float)):
+            return float(x)
+        s = str(x).strip()
+        if s == "":
+            return 0.0
+        s = s.replace(",", "")
+        return float(s)
+    except Exception:
+        return 0.0
+
+
+def sanitize_label_value(v):
+    """
+    Make a string safe to use as a prometheus label value.
+    We keep it simple: trim, replace newlines, collapse spaces.
+    """
+    if v is None:
+        return ""
+    s = str(v).strip()
+    s = s.replace("\n", " ").replace("\r", " ")
+    s = re.sub(r"\s+", " ", s)
+    # Avoid very long labels by truncating (reasonable safety)
+    if len(s) > 512:
+        s = s[:512]
+    return s
+
+
+def read_csv_rows(filepath):
+    rows = []
+    with open(filepath, newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            rows.append(r)
+    return rows
+
+
+def build_and_push_combined(directory, pushgateway):
+    # Collect file lists
+    all_files = [os.path.join(directory, f) for f in os.listdir(directory) if f.lower().endswith(".csv")]
+    if not all_files:
+        print("No CSV files found in", directory)
+        return
+
+    # Prepare combined lists
+    non_summary_rows = []
+    summary_rows = []
+
+    for fp in all_files:
+        fname = os.path.basename(fp)
+        try:
+            rows = read_csv_rows(fp)
+        except Exception as e:
+            print(f"Error reading {fp}: {e}")
+            continue
+
+        if SUMMARY_MARK in fname:
+            for r in rows:
+                # attach origin metadata
+                r["_file_name"] = fname
+                r["_file_date"] = extract_date_from_filename(fname)
+                summary_rows.append(r)
+        else:
+            for r in rows:
+                r["_file_name"] = fname
+                r["_file_date"] = extract_date_from_filename(fname)
+                non_summary_rows.append(r)
+
+    push_time = human_push_time()
+
+    # --- Build registry for non-summary combined push ---
+    if non_summary_rows:
+        reg_ns = CollectorRegistry()
+
+        # Define gauges (metric names)
+        g_duration = Gauge(f"{NS}_non_summary_duration_seconds",
+                           "Duration of job run (seconds) from non-summary files",
+                           ['file_name', 'file_date', 'push_time',
+                            'bp_name', 'thread_id', 'job_id', 'start_time', 'end_time', 'job_details'],
+                           registry=reg_ns)
+
+        g_no_trades = Gauge(f"{NS}_non_summary_no_of_trades",
+                            "Number of trades in job run (from non-summary files)",
+                            ['file_name', 'file_date', 'push_time',
+                             'bp_name', 'thread_id', 'job_id', 'start_time', 'end_time', 'job_details'],
+                            registry=reg_ns)
+
+        g_duration_per_trade = Gauge(f"{NS}_non_summary_duration_per_trade_seconds",
+                                     "Duration per trade (seconds) from non-summary files",
+                                     ['file_name', 'file_date', 'push_time',
+                                      'bp_name', 'thread_id', 'job_id', 'start_time', 'end_time', 'job_details'],
+                                     registry=reg_ns)
+
+        # Iterate rows and set metrics
+        for r in non_summary_rows:
+            fname = sanitize_label_value(r.get("_file_name", ""))
+            fdate = sanitize_label_value(r.get("_file_date", ""))
+            bp_name = sanitize_label_value(r.get("BP NAME", r.get("BP_NAME", r.get("bp name", ""))))
+            thread_id = sanitize_label_value(r.get("Thread ID", r.get("ThreadID", r.get("thread id", ""))))
+            job_id = sanitize_label_value(r.get("JOB ID", r.get("Job ID", r.get("job id", ""))))
+            start_time = sanitize_label_value(r.get("Start Time", r.get("StartTime", "")))
+            end_time = sanitize_label_value(r.get("End Time", r.get("EndTime", "")))
+            job_details = sanitize_label_value(r.get("JobDetails", r.get("Job Details", r.get("job details", ""))))
+
+            # numeric columns
+            duration = safe_float(r.get("Duration", r.get("duration", 0)))
+            no_of_trades = safe_float(r.get("No of trades", r.get("No of Trades", r.get("no_of_trades", 0))))
+            duration_per_trade = safe_float(r.get("DurationPerTrade", r.get("Duration Per Trade", r.get("duration_per_trade", 0))))
+
+            label_values = [fname, fdate, push_time, bp_name, thread_id, job_id, start_time, end_time, job_details]
+
+            try:
+                g_duration.labels(*label_values).set(duration)
+                g_no_trades.labels(*label_values).set(no_of_trades)
+                g_duration_per_trade.labels(*label_values).set(duration_per_trade)
+            except Exception as e:
+                # sometimes label cardinality or invalid label can raise; report and continue
+                print(f"Warning setting non-summary metric for row in {fname}: {e}")
+
+        # push under stable job name bp_non_summary
+        try:
+            push_to_gateway(pushgateway, job="bp_non_summary", registry=reg_ns)
+            print(f"Pushed combined non-summary metrics to job 'bp_non_summary' (rows: {len(non_summary_rows)})")
+        except Exception as e:
+            print("Error pushing non-summary to Pushgateway:", e)
+    else:
+        print("No non-summary rows found.")
+
+    # --- Build registry for summary combined push ---
+    if summary_rows:
+        reg_s = CollectorRegistry()
+
+        g_avg_duration = Gauge(f"{NS}_summary_average_duration_seconds",
+                               "Average duration from summary files (seconds)",
+                               ['file_name', 'file_date', 'push_time', 'job_details'],
+                               registry=reg_s)
+
+        g_total_trades = Gauge(f"{NS}_summary_total_trades",
+                               "Total trades from summary files",
+                               ['file_name', 'file_date', 'push_time', 'job_details'],
+                               registry=reg_s)
+
+        g_job_count = Gauge(f"{NS}_summary_job_count",
+                            "Job count from summary files",
+                            ['file_name', 'file_date', 'push_time', 'job_details'],
+                            registry=reg_s)
+
+        for r in summary_rows:
+            fname = sanitize_label_value(r.get("_file_name", ""))
+            fdate = sanitize_label_value(r.get("_file_date", ""))
+            job_details = sanitize_label_value(r.get("Job Details", r.get("JobDetails", r.get("job details", ""))))
+
+            avg_duration = safe_float(r.get("Average Duration", r.get("AverageDuration", r.get("average_duration", 0))))
+            total_trades = safe_float(r.get("Total trades", r.get("TotalTrades", r.get("total_trades", 0))))
+            job_count = safe_float(r.get("JobCount", r.get("Job Count", r.get("job_count", 0))))
+
+            label_values = [fname, fdate, push_time, job_details]
+            try:
+                g_avg_duration.labels(*label_values).set(avg_duration)
+                g_total_trades.labels(*label_values).set(total_trades)
+                g_job_count.labels(*label_values).set(job_count)
+            except Exception as e:
+                print(f"Warning setting summary metric for row in {fname}: {e}")
+
+        try:
+            push_to_gateway(pushgateway, job="bp_summary", registry=reg_s)
+            print(f"Pushed combined summary metrics to job 'bp_summary' (rows: {len(summary_rows)})")
+        except Exception as e:
+            print("Error pushing summary to Pushgateway:", e)
+    else:
+        print("No summary rows found.")
+
+    print("Done.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Combine CSVs and push combined metrics to Pushgateway")
+    parser.add_argument("--dir", required=True, help="Directory containing CSV files")
+    parser.add_argument("--pushgateway", required=True, help="Pushgateway URL (e.g. http://localhost:9091)")
+    args = parser.parse_args()
+
+    build_and_push_combined(args.dir, args.pushgateway)
+
+
+if __name__ == "__main__":
+    main()
