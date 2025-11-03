@@ -1,0 +1,99 @@
+import os
+import pandas as pd
+from datetime import datetime, timezone
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+DATA_DIR = r"C:\path\to\bp\csv\folder"
+PUSHGATEWAY = "http://localhost:9091"
+
+def extract_date(name):
+    try:
+        date_str = name.split("_")[-1].replace(".csv", "").replace("_summary", "")
+        return datetime.strptime(date_str, "%Y-%m-%d")
+    except:
+        return None
+
+
+summary_files = []
+non_summary_files = []
+
+for f in os.listdir(DATA_DIR):
+    if f.endswith(".csv"):
+        if "summary" in f.lower():
+            summary_files.append(f)
+        else:
+            non_summary_files.append(f)
+
+# ===== Determine Latest Date =====
+all_files = summary_files + non_summary_files
+latest_date = max(extract_date(f) for f in all_files if extract_date(f))
+latest_date_str = latest_date.strftime("%Y-%m-%d")
+
+# ================== SUMMARY ==================
+summary_frames = []
+for file in summary_files:
+    df = pd.read_csv(os.path.join(DATA_DIR, file))
+    df["file_name"] = file
+    df["file_date"] = extract_date(file)
+    summary_frames.append(df)
+
+if summary_frames:
+    summary_all = pd.concat(summary_frames, ignore_index=True)
+
+    avg_duration = summary_all["Average Duration"].mean()
+    total_trades = summary_all["Total Trades"].sum()
+    job_count = summary_all["JobCount"].sum()
+
+    registry = CollectorRegistry()
+
+    g1 = Gauge("bp_summary_average_duration_seconds", "Average duration across all jobs",
+               ["file_name", "file_date"], registry=registry)
+    g2 = Gauge("bp_summary_total_trades", "Total trades across all jobs",
+               ["file_name", "file_date"], registry=registry)
+    g3 = Gauge("bp_summary_job_count", "Total job count",
+               ["file_name", "file_date"], registry=registry)
+    ts = Gauge("bp_summary_push_timestamp", "Data push timestamp UNIX",
+               ["file_name", "file_date"], registry=registry)
+
+    g1.labels("ALL", latest_date_str).set(avg_duration)
+    g2.labels("ALL", latest_date_str).set(total_trades)
+    g3.labels("ALL", latest_date_str).set(job_count)
+    ts.labels("ALL", latest_date_str).set_to_current_time()
+
+    push_to_gateway(f"{PUSHGATEWAY}/metrics/job/bp_summary", registry=registry)
+    print("✅ Summary pushed:", latest_date_str)
+
+
+# ================== NON-SUMMARY ==================
+non_summary_frames = []
+for file in non_summary_files:
+    df = pd.read_csv(os.path.join(DATA_DIR, file))
+    df["file_name"] = file
+    df["file_date"] = extract_date(file)
+    non_summary_frames.append(df)
+
+if non_summary_frames:
+    non_summary_all = pd.concat(non_summary_frames, ignore_index=True)
+
+    duration_avg = non_summary_all["Duration"].mean()
+    duration_per_trade_avg = non_summary_all["DurationPerTrade"].mean()
+    total_trades_ns = non_summary_all["No of trades"].sum()
+
+    registry = CollectorRegistry()
+
+    g1 = Gauge("bp_non_summary_duration_seconds", "Average duration across processes",
+               ["file_name", "file_date"], registry=registry)
+    g2 = Gauge("bp_non_summary_duration_per_trade_seconds", "Avg duration per trade",
+               ["file_name", "file_date"], registry=registry)
+    g3 = Gauge("bp_non_summary_no_of_trades", "Total trades",
+               ["file_name", "file_date"], registry=registry)
+    ts = Gauge("bp_non_summary_push_timestamp", "Data push timestamp UNIX",
+               ["file_name", "file_date"], registry=registry)
+
+    g1.labels("ALL", latest_date_str).set(duration_avg)
+    g2.labels("ALL", latest_date_str).set(duration_per_trade_avg)
+    g3.labels("ALL", latest_date_str).set(total_trades_ns)
+    ts.labels("ALL", latest_date_str).set_to_current_time()
+
+    push_to_gateway(f"{PUSHGATEWAY}/metrics/job/bp_non_summary", registry=registry)
+    print("✅ Non-summary pushed:", latest_date_str)
