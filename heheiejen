@@ -1,0 +1,86 @@
+import os
+import json
+import shutil
+import logging
+from datetime import datetime, timedelta
+
+def folder_all_files_old(folder_path, cutoff_time):
+    """
+    Returns True if all files in the folder (recursively) are older than cutoff_time.
+    If folder has no files at all, treat it as old.
+    """
+    has_files = False
+
+    for root, dirs, files in os.walk(folder_path):
+        for file in files:
+            has_files = True
+            file_path = os.path.join(root, file)
+            try:
+                file_mtime = datetime.fromtimestamp(os.path.getmtime(file_path))
+            except OSError:
+                continue
+
+            if file_mtime >= cutoff_time:
+                return False  # Contains a recent file → Keep the folder
+
+    return True  # Either no files or all old → Delete folder
+
+def get_folder_size(folder_path):
+    total_size = 0
+    for root, dirs, files in os.walk(folder_path):
+        for f in files:
+            try:
+                total_size += os.path.getsize(os.path.join(root, f))
+            except:
+                pass
+    return total_size
+
+def cleanup_folders(base_path, retention_days):
+    cutoff_time = datetime.now() - timedelta(days=retention_days)
+    total_reclaimed = 0
+
+    for item in os.listdir(base_path):
+        folder_path = os.path.join(base_path, item)
+
+        if not os.path.isdir(folder_path):
+            continue
+
+        if folder_all_files_old(folder_path, cutoff_time):
+            folder_size = get_folder_size(folder_path)
+            try:
+                shutil.rmtree(folder_path)
+                total_reclaimed += folder_size
+                logging.info(f"Deleted folder: {folder_path} | Reclaimed: {folder_size/1024/1024:.2f} MB")
+            except Exception as e:
+                logging.error(f"Failed to delete {folder_path}: {e}")
+        else:
+            logging.info(f"Kept folder (recent files found): {folder_path}")
+
+    return total_reclaimed
+
+def main():
+    with open("config.json", "r") as f:
+        config = json.load(f)
+
+    base_path = config["share_path"]
+    retention_days = config["retention_days"]
+
+    # Logging setup with timestamp
+    log_filename = f"cleanup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    logging.basicConfig(
+        filename=log_filename,
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s"
+    )
+    logging.getLogger().addHandler(logging.StreamHandler())
+
+    logging.info(f"Cleanup started at: {base_path}")
+    logging.info(f"Retention days: {retention_days}")
+
+    reclaimed = cleanup_folders(base_path, retention_days)
+
+    logging.info(f"Total space reclaimed: {reclaimed/1024/1024:.2f} MB")
+    logging.info("Cleanup completed successfully ✅")
+
+if __name__ == "__main__":
+    main()
