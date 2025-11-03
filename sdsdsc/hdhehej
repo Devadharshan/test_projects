@@ -1,0 +1,108 @@
+import os
+import glob
+import pandas as pd
+from datetime import datetime
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+DATA_DIR = r"C:\path\to\your\csv\folder"
+PUSHGATEWAY_URL = "http://localhost:9091"
+
+def extract_file_date(filename):
+    clean = filename.replace("–", "-").replace("—", "-").replace("_summary", "")
+    date_str = clean.split("_")[-1].replace(".csv", "").strip()
+    datetime.strptime(date_str, "%Y-%m-%d")  # validate
+    return date_str
+
+def date_to_timestamp(date_str):
+    return int(datetime.strptime(date_str, "%Y-%m-%d").timestamp())
+
+def process_files():
+
+    registry = CollectorRegistry()
+
+    # Summary gauges (with registry explicitly passed)
+    g_avg = Gauge(
+        "bp_summary_new_average_duration_seconds",
+        "Average Duration",
+        ["job_details", "file_name", "file_date", "file_timestamp"],
+        registry=registry,
+    )
+    g_total = Gauge(
+        "bp_summary_new_total_trades",
+        "Total Trades",
+        ["job_details", "file_name", "file_date", "file_timestamp"],
+        registry=registry,
+    )
+    g_count = Gauge(
+        "bp_summary_new_job_count",
+        "Job Count",
+        ["job_details", "file_name", "file_date", "file_timestamp"],
+        registry=registry,
+    )
+
+    # Non-summary gauges
+    g_dur = Gauge(
+        "bp_non_summary_new_duration_seconds",
+        "Duration",
+        ["bp_name", "thread_id", "job_details", "file_name", "file_date", "file_timestamp"],
+        registry=registry,
+    )
+    g_trades = Gauge(
+        "bp_non_summary_new_no_of_trades",
+        "No of Trades",
+        ["bp_name", "thread_id", "job_details", "file_name", "file_date", "file_timestamp"],
+        registry=registry,
+    )
+    g_dpt = Gauge(
+        "bp_non_summary_new_duration_per_trade_seconds",
+        "Duration Per Trade",
+        ["bp_name", "thread_id", "job_details", "file_name", "file_date", "file_timestamp"],
+        registry=registry,
+    )
+
+    summary_files = glob.glob(os.path.join(DATA_DIR, "*_summary.csv"))
+    nonsummary_files = [f for f in glob.glob(os.path.join(DATA_DIR, "*.csv")) if "_summary" not in f]
+
+    # Summary
+    for f in summary_files:
+        fn = os.path.basename(f)
+        fd = extract_file_date(fn)
+        ts = str(date_to_timestamp(fd))
+        df = pd.read_csv(f)
+
+        for _, r in df.iterrows():
+            jd = str(r["Job Details"])
+
+            g_avg.labels(jd, fn, fd, ts).set(float(r["Average Duration"]))
+            g_total.labels(jd, fn, fd, ts).set(float(r["Total Trades"]))
+            g_count.labels(jd, fn, fd, ts).set(float(r["JobCount"]))
+
+    # Non-summary
+    for f in nonsummary_files:
+        fn = os.path.basename(f)
+        fd = extract_file_date(fn)
+        ts = str(date_to_timestamp(fd))
+        df = pd.read_csv(f)
+
+        for _, r in df.iterrows():
+            g_dur.labels(
+                str(r["BP NAME"]), str(r["Thread ID"]), str(r["JobDetails"]), fn, fd, ts
+            ).set(float(r["Duration"]))
+
+            g_trades.labels(
+                str(r["BP NAME"]), str(r["Thread ID"]), str(r["JobDetails"]), fn, fd, ts
+            ).set(float(r["No of trades"]))
+
+            g_dpt.labels(
+                str(r["BP NAME"]), str(r["Thread ID"]), str(r["JobDetails"]), fn, fd, ts
+            ).set(float(r["DurationPerTrade"]))
+
+    # Push both jobs
+    push_to_gateway(PUSHGATEWAY_URL, job="bp_summary_new", registry=registry)
+    push_to_gateway(PUSHGATEWAY_URL, job="bp_non_summary_new", registry=registry)
+
+    print("✅ Metrics pushed successfully")
+
+
+if __name__ == "__main__":
+    process_files()
