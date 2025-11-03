@@ -1,0 +1,93 @@
+import os
+import glob
+import pandas as pd
+import time
+from datetime import datetime
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+FOLDER_PATH = r"C:\path\to\your\csv\files"
+PUSHGATEWAY_URL = "http://localhost:9091"
+
+summary_job = "bp_summary_new"
+nonsummary_job = "bp_non_summary_new"
+
+def extract_file_date(filename):
+    # Example filename: Bp3_ProdLon_x64_2025-10-30.csv
+    parts = filename.split("_")
+    date_part = parts[-1].replace(".csv", "").replace(".CSV", "")
+    return date_part  # "2025-10-30"
+
+def date_to_timestamp(date_str):
+    return int(datetime.strptime(date_str, "%Y-%m-%d").timestamp())
+
+def main():
+    summary_files = glob.glob(os.path.join(FOLDER_PATH, "*_summary.csv"))
+    nonsummary_files = glob.glob(os.path.join(FOLDER_PATH, "*.csv"))
+    nonsummary_files = [f for f in nonsummary_files if "_summary" not in f]
+
+    # ---- PROCESS SUMMARY FILES ----
+    summary_registry = CollectorRegistry()
+
+    g_avg_dur = Gauge("bp_summary_average_duration_seconds", 
+                      "Average duration from summary", 
+                      ["job_details", "file_date", "file_timestamp", "file_name"], 
+                      registry=summary_registry)
+
+    g_total_trades = Gauge("bp_summary_total_trades", 
+                           "Total trades from summary", 
+                           ["job_details", "file_date", "file_timestamp", "file_name"],
+                           registry=summary_registry)
+
+    g_job_count = Gauge("bp_summary_job_count", 
+                        "Job count from summary", 
+                        ["job_details", "file_date", "file_timestamp", "file_name"],
+                        registry=summary_registry)
+
+    for file in summary_files:
+        df = pd.read_csv(file)
+        file_name = os.path.basename(file)
+        file_date = extract_file_date(file_name)
+        ts = str(date_to_timestamp(file_date))
+
+        for _, row in df.iterrows():
+            g_avg_dur.labels(row["Job Details"], file_date, ts, file_name).set(float(row["Average Duration"]))
+            g_total_trades.labels(row["Job Details"], file_date, ts, file_name).set(float(row["Total Trades"]))
+            g_job_count.labels(row["Job Details"], file_date, ts, file_name).set(float(row["JobCount"]))
+
+    push_to_gateway(PUSHGATEWAY_URL, job=summary_job, registry=summary_registry)
+
+    # ---- PROCESS NON-SUMMARY FILES ----
+    nonsummary_registry = CollectorRegistry()
+
+    g_duration = Gauge("bp_non_summary_duration_seconds",
+                        "Duration per run",
+                        ["bp_name", "thread_id", "job_details", "file_date", "file_timestamp", "file_name"],
+                        registry=nonsummary_registry)
+
+    g_no_trades = Gauge("bp_non_summary_no_of_trades",
+                        "Number of trades",
+                        ["bp_name", "thread_id", "job_details", "file_date", "file_timestamp", "file_name"],
+                        registry=nonsummary_registry)
+
+    g_duration_per_trade = Gauge("bp_non_summary_duration_per_trade_seconds",
+                        "Duration per trade",
+                        ["bp_name", "thread_id", "job_details", "file_date", "file_timestamp", "file_name"],
+                        registry=nonsummary_registry)
+
+    for file in nonsummary_files:
+        df = pd.read_csv(file)
+        file_name = os.path.basename(file)
+        file_date = extract_file_date(file_name)
+        ts = str(date_to_timestamp(file_date))
+
+        for _, row in df.iterrows():
+            g_duration.labels(row["BP NAME"], str(row["Thread ID"]), row["JobDetails"], file_date, ts, file_name).set(float(row["Duration"]))
+            g_no_trades.labels(row["BP NAME"], str(row["Thread ID"]), row["JobDetails"], file_date, ts, file_name).set(float(row["No of trades"]))
+            g_duration_per_trade.labels(row["BP NAME"], str(row["Thread ID"]), row["JobDetails"], file_date, ts, file_name).set(float(row["DurationPerTrade"]))
+
+    push_to_gateway(PUSHGATEWAY_URL, job=nonsummary_job, registry=nonsummary_registry)
+
+    print("✅ Metrics successfully pushed to Prometheus Pushgateway")
+
+if __name__ == "__main__":
+    main()
