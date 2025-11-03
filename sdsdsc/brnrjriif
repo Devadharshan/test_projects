@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+"""
+push_bp_metrics_aggregated_new.py
+
+Aggregates CSV files per file_date and pushes aggregated metrics (one sample per group per date)
+to Pushgateway with sample timestamps set to the file_date (midnight Asia/Kolkata).
+
+Edit DATA_DIR and PUSHGATEWAY as needed.
+
+Requirements:
+   pip install pandas requests
+Works best on Python 3.9+ (zoneinfo available). If older, fallback uses fixed IST offset.
+"""
+import os
+import glob
+import re
+import csv
+import math
+from collections import defaultdict
+from datetime import datetime, time, timezone, timedelta
+
+import pandas as pd
+import requests
+
+# config
+DATA_DIR = r"C:\path\to\your\csv\folder"    # <-- update this
+PUSHGATEWAY_BASE = "http://localhost:9091"
+SUMMARY_JOB = "bp_summary_new"
+NONSUMMARY_JOB = "bp_non_summary_new"
+
+# metric names (final)
+# summary
+M_SUM_AVG = "bp_summary_new_average_duration_seconds"
+M_SUM_MIN = "bp_summary_new_min_duration_seconds"
+M_SUM_MAX = "bp_summary_new_max_duration_seconds"
+M_SUM_TOTAL_TRADES = "bp_summary_new_total_trades"
+M_SUM_JOB_COUNT = "bp_summary_new_job_count"
+M_SUM_AVG_DUR_PER_TRADE = "bp_summary_new_avg_duration_per_trade_seconds"
+M_SUM_FILES_COUNT = "bp_summary_new_files_count"
+
+# non-summary
+M_NS_AVG = "bp_non_summary_new_avg_duration_seconds"
+M_NS_MIN = "bp_non_summary_new_min_duration_seconds"
+M_NS_MAX = "bp_non_summary_new_max_duration_seconds"
+M_NS_AVG_TRADES = "bp_non_summary_new_avg_no_of_trades"
+M_NS_MIN_TRADES = "bp_non_summary_new_min_no_of_trades"
+M_NS_MAX_TRADES = "bp_non_summary_new_max_no_of_trades"
+M_NS_AVG_DPT = "bp_non_summary_new_avg_duration_per_trade_seconds"
+M_NS_FILES_COUNT = "bp_non_summary_new_files_count"
+
+# filename date regex (YYYY-MM-DD)
+FNAME_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+
+# timezone handling for Asia/Kolkata
+try:
+    from zoneinfo import ZoneInfo
+    KOLKATA = ZoneInfo("Asia/Kolkata")
+except Exception:
+    KOLKATA = None
+    # fallback offset seconds for IST
+    IST_OFFSET_SECONDS = 5 * 3600 + 30 * 60
+
+def extract_date_from_filename(fn):
+    """Return YYYY-MM-DD string found in filename or raise ValueError"""
+    m = FNAME_DATE_RE.search(fn)
+    if not m:
+        raise ValueError(f"No YYYY-MM-DD found in filename: {fn}")
+    return m.group(1)
+
+def file_date_to_epoch_seconds_midnight_ist(date_str):
+    """Interpret date_str YYYY-MM-DD as midnight Asia/Kolkata and return epoch seconds (int)"""
+    dt = datetime.strptime(date_str, "%Y-%m-%d")
+    dt_mid = datetime.combine(dt.date(), time(0, 0, 0))
+    if KOLKATA:
+        dt_mid = dt_mid.replace(tzinfo=KOLKATA)
+        return int(dt_mid.astimezone(timezone.utc).timestamp())
+    else:
+        # fallback: approximate using IST offset
+        epoch = int((dt_mid - datetime(1970, 1, 1)).total_seconds() - (timezone.utc.utcoffset(datetime.utcnow()) or 0).total_seconds() + IST_OFFSET_SECONDS)
+        return epoch
+
+def safe_float(x):
+    try:
+        if x is None:
+            return None
+        s = str(x)
+        s = s.strip()
+        if s == "":
+            return None
+        return float(s.replace(",", ""))
+    except Exception:
+        return None
+
+def aggregate_summary_files(files):
+    """
+    Returns dict keyed by (job_details, file_date) -> aggregation dict:
+      durations[], total_trades_sum, jobcount_sum, files_set
+    """
+    aggs = {}
+    for f in files:
+        fn = os.path.basename(f)
+        try:
+            file_date = extract_date_from_filename(fn)
+        except ValueError:
+            print("Skipping (no date):", fn)
+            continue
+
+        try:
+            df = pd.read_csv(f)
+        except Exception as e:
+            print("Failed reading", f, e)
+            continue
+
+        # ensure column names normalized access
+        for idx, row in df.iterrows():
+            job_details = row.get("Job Details") if "Job Details" in row else row.get("JobDetails") or ""
+            job_details = str(job_details).strip()
+            avg_dur = safe_float(row.get("Average Duration") or row.get("AverageDuration") or row.get("Duration"))
+            total_trades = safe_float(row.get("Total Trades") or row.get("TotalTrades") or row.get("Total_trades"))
+            jobcount = safe_float(row.get("JobCount") or row.get("Job Count"))
+
+            key = (job_details, file_date)
+            a = aggs.setdefault(key, {"durations": [], "total_trades": 0.0, "job_count": 0.0, "files": set()})
+            if avg_dur is not None:
+                a["durations"].append(avg_dur)
+            if total_trades is not None:
+                a["total_trades"] += total_trades
+            # jobcount: if present sum, else count rows
+            if jobcount is not None:
+                a["job_count"] += jobcount
+            else:
+                a["job_count"] += 1
+            a["files"].add(fn)
+    return aggs
+
+def aggregate_non_summary_files(files):
+    """
+    Returns dict keyed by (job_details, bp_name, thread_id, file_date) -> aggregation dict:
+       durations[], trades_list[], dpt_list[], files_set
+    """
+    aggs = {}
+    for f in files:
+        fn = os.path.basename(f)
+        try:
+            file_date = extract_date_from_filename(fn)
+        except ValueError:
+            print("Skipping (no date):", fn)
+            continue
+
+        try:
+            df = pd.read_csv(f)
+        except Exception as e:
+            print("Failed reading", f, e)
+            continue
+
+        for idx, row in df.iterrows():
+            bp_name = row.get("BP NAME") or row.get("Bp Name") or ""
+            thread_id = row.get("Thread ID") or row.get("ThreadID") or ""
+            job_details = row.get("JobDetails") or row.get("Job Details") or ""
+            bp_name = str(bp_name).strip()
+            thread_id = str(thread_id).strip()
+            job_details = str(job_details).strip()
+
+            duration = safe_float(row.get("Duration"))
+            no_of_trades = safe_float(row.get("No of trades") or row.get("No of Trades"))
+            dpt = safe_float(row.get("DurationPerTrade") or row.get("Duration Per Trade"))
+
+            # if dpt missing but duration & trades present, compute per-row
+            if dpt is None and duration is not None and no_of_trades:
+                try:
+                    dpt = duration / no_of_trades
+                except Exception:
+                    dpt = None
+
+            key = (job_details, bp_name, thread_id, file_date)
+            a = aggs.setdefault(key, {"durations": [], "trades": [], "dpt": [], "files": set()})
+            if duration is not None:
+                a["durations"].append(duration)
+            if no_of_trades is not None:
+                a["trades"].append(no_of_trades)
+            if dpt is not None:
+                a["dpt"].append(dpt)
+            a["files"].add(fn)
+    return aggs
+
+def build_text_payload_summary(aggs):
+    """
+    Build Prometheus text format payload for summary aggregated groups.
+    Each group will produce multiple metric lines with the same timestamp (file_date epoch).
+    """
+    lines = []
+    # HELP/TYPE headers (optional, but helpful)
+    lines.append(f"# HELP {M_SUM_AVG} Aggregated average duration (seconds) per job_details per date")
+    lines.append(f"# TYPE {M_SUM_AVG} gauge")
+    lines.append(f"# HELP {M_SUM_MIN} Min duration")
+    lines.append(f"# TYPE {M_SUM_MIN} gauge")
+    lines.append(f"# HELP {M_SUM_MAX} Max duration")
+    lines.append(f"# TYPE {M_SUM_MAX} gauge")
+    lines.append(f"# HELP {M_SUM_TOTAL_TRADES} Total trades")
+    lines.append(f"# TYPE {M_SUM_TOTAL_TRADES} gauge")
+    lines.append(f"# HELP {M_SUM_JOB_COUNT} Job count")
+    lines.append(f"# TYPE {M_SUM_JOB_COUNT} gauge")
+    lines.append(f"# HELP {M_SUM_AVG_DUR_PER_TRADE} Avg duration per trade")
+    lines.append(f"# TYPE {M_SUM_AVG_DUR_PER_TRADE} gauge")
+    lines.append(f"# HELP {M_SUM_FILES_COUNT} Number of files combined")
+    lines.append(f"# TYPE {M_SUM_FILES_COUNT} gauge")
+
+    for (job_details, file_date), a in aggs.items():
+        ts = file_date_to_epoch_seconds_midnight_ist(file_date)
+        durations = a["durations"]
+        avg_dur = float(sum(durations) / len(durations)) if durations else 0.0
+        min_dur = float(min(durations)) if durations else 0.0
+        max_dur = float(max(durations)) if durations else 0.0
+        total_trades = float(a["total_trades"])
+        job_count = float(a["job_count"])
+        avg_dur_per_trade = (avg_dur / total_trades) if total_trades and total_trades > 0 else 0.0
+        files_count = len(a["files"])
+
+        # labels: job_details, file_date, file_timestamp, files_count not as label
+        labels = f'job_details="{job_details}",file_date="{file_date}",file_timestamp="{ts}"'
+        lines.append(f'{M_SUM_AVG}{{{labels}}} {avg_dur} {ts}')
+        lines.append(f'{M_SUM_MIN}{{{labels}}} {min_dur} {ts}')
+        lines.append(f'{M_SUM_MAX}{{{labels}}} {max_dur} {ts}')
+        lines.append(f'{M_SUM_TOTAL_TRADES}{{{labels}}} {total_trades} {ts}')
+        lines.append(f'{M_SUM_JOB_COUNT}{{{labels}}} {job_count} {ts}')
+        lines.append(f'{M_SUM_AVG_DUR_PER_TRADE}{{{labels}}} {avg_dur_per_trade} {ts}')
+        lines.append(f'{M_SUM_FILES_COUNT}{{{labels}}} {files_count} {ts}')
+
+    return "\n".join(lines) + "\n"
+
+def build_text_payload_non_summary(aggs):
+    lines = []
+    lines.append(f"# HELP {M_NS_AVG} Aggregated avg duration per bp/thread/day")
+    lines.append(f"# TYPE {M_NS_AVG} gauge")
+    lines.append(f"# HELP {M_NS_MIN} min duration")
+    lines.append(f"# TYPE {M_NS_MIN} gauge")
+    lines.append(f"# HELP {M_NS_MAX} max duration")
+    lines.append(f"# TYPE {M_NS_MAX} gauge")
+    lines.append(f"# HELP {M_NS_AVG_TRADES} avg no_of_trades")
+    lines.append(f"# TYPE {M_NS_AVG_TRADES} gauge")
+    lines.append(f"# HELP {M_NS_MIN_TRADES} min no_of_trades")
+    lines.append(f"# TYPE {M_NS_MIN_TRADES} gauge")
+    lines.append(f"# HELP {M_NS_MAX_TRADES} max no_of_trades")
+    lines.append(f"# TYPE {M_NS_MAX_TRADES} gauge")
+    lines.append(f"# HELP {M_NS_AVG_DPT} avg duration per trade")
+    lines.append(f"# TYPE {M_NS_AVG_DPT} gauge")
+    lines.append(f"# HELP {M_NS_FILES_COUNT} files count")
+    lines.append(f"# TYPE {M_NS_FILES_COUNT} gauge")
+
+    for (job_details, bp_name, thread_id, file_date), a in aggs.items():
+        ts = file_date_to_epoch_seconds_midnight_ist(file_date)
+        durations = a["durations"]
+        trades = a["trades"]
+        dpt = a["dpt"]
+
+        avg_dur = float(sum(durations)/len(durations)) if durations else 0.0
+        min_dur = float(min(durations)) if durations else 0.0
+        max_dur = float(max(durations)) if durations else 0.0
+
+        avg_trades = float(sum(trades)/len(trades)) if trades else 0.0
+        min_trades = float(min(trades)) if trades else 0.0
+        max_trades = float(max(trades)) if trades else 0.0
+
+        if dpt:
+            avg_dpt = float(sum(dpt)/len(dpt))
+        else:
+            avg_dpt = (avg_dur / avg_trades) if avg_trades and avg_trades > 0 else 0.0
+
+        files_count = len(a["files"])
+
+        labels = f'job_details="{job_details}",bp_name="{bp_name}",thread_id="{thread_id}",file_date="{file_date}",file_timestamp="{ts}"'
+        lines.append(f'{M_NS_AVG}{{{labels}}} {avg_dur} {ts}')
+        lines.append(f'{M_NS_MIN}{{{labels}}} {min_dur} {ts}')
+        lines.append(f'{M_NS_MAX}{{{labels}}} {max_dur} {ts}')
+        lines.append(f'{M_NS_AVG_TRADES}{{{labels}}} {avg_trades} {ts}')
+        lines.append(f'{M_NS_MIN_TRADES}{{{labels}}} {min_trades} {ts}')
+        lines.append(f'{M_NS_MAX_TRADES}{{{labels}}} {max_trades} {ts}')
+        lines.append(f'{M_NS_AVG_DPT}{{{labels}}} {avg_dpt} {ts}')
+        lines.append(f'{M_NS_FILES_COUNT}{{{labels}}} {files_count} {ts}')
+
+    return "\n".join(lines) + "\n"
+
+def push_payload_to_pushgateway(payload_text, job_name):
+    url = PUSHGATEWAY_BASE.rstrip("/") + f"/metrics/job/{job_name}"
+    headers = {"Content-Type": "text/plain; version=0.0.4"}
+    resp = requests.post(url, data=payload_text.encode("utf-8"), headers=headers, timeout=30)
+    resp.raise_for_status()
+    return resp
+
+def main():
+    # find files
+    summary_files = glob.glob(os.path.join(DATA_DIR, "*_summary.csv"))
+    nonsummary_files = [f for f in glob.glob(os.path.join(DATA_DIR, "*.csv")) if "_summary" not in f]
+
+    print("Found summary files:", len(summary_files), "non-summary files:", len(nonsummary_files))
+
+    # aggregate
+    summary_aggs = aggregate_summary_files(summary_files)
+    nonsummary_aggs = aggregate_non_summary_files(nonsummary_files)
+
+    # build payloads
+    if summary_aggs:
+        payload_summary = build_text_payload_summary(summary_aggs)
+        # push
+        print("Pushing aggregated summary metrics... (groups:", len(summary_aggs), ")")
+        r = push_payload_to_pushgateway(payload_summary, SUMMARY_JOB)
+        print("Summary push status:", r.status_code)
+    else:
+        print("No summary groups to push.")
+
+    if nonsummary_aggs:
+        payload_ns = build_text_payload_non_summary(nonsummary_aggs)
+        print("Pushing aggregated non-summary metrics... (groups:", len(nonsummary_aggs), ")")
+        r = push_payload_to_pushgateway(payload_ns, NONSUMMARY_JOB)
+        print("Non-summary push status:", r.status_code)
+    else:
+        print("No non-summary groups to push.")
+
+if __name__ == "__main__":
+    main()
