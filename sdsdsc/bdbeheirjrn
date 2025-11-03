@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""
+push_bp_metrics_new.py
+
+- Reads summary and non-summary CSVs from a folder
+- Extracts file_date from filename (expects YYYY-MM-DD at end)
+- Adds labels: file_name, file_date, file_timestamp
+- Pushes metrics under jobs:
+    - bp_summary_new
+    - bp_non_summary_new
+- Metric names (new):
+    bp_summary_new_average_duration_seconds
+    bp_summary_new_total_trades
+    bp_summary_new_job_count
+
+    bp_non_summary_new_duration_seconds
+    bp_non_summary_new_no_of_trades
+    bp_non_summary_new_duration_per_trade_seconds
+
+Requirements:
+    pip install pandas prometheus_client
+"""
+import os
+import glob
+import pandas as pd
+from datetime import datetime
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# ---------- CONFIG ----------
+DATA_DIR = r"C:\path\to\your\csv\folder"   # <-- set your folder
+PUSHGATEWAY_URL = "http://localhost:9091"
+
+SUMMARY_JOB = "bp_summary_new"
+NONSUMMARY_JOB = "bp_non_summary_new"
+
+
+# ---------- helpers ----------
+def extract_file_date(filename: str) -> str:
+    """
+    Extracts date string YYYY-MM-DD from filenames like:
+      Bp_ProdLon_x64_2025-10-30.csv
+      Bp_ProdLon_x64_2025-10-30_summary.csv
+    Returns date_str (e.g. "2025-10-30") or raises ValueError.
+    """
+    clean = filename.replace("–", "-").replace("—", "-")
+    clean = clean.replace("_summary", "")
+    clean = clean.replace(".CSV", "").replace(".csv", "")
+    date_part = clean.split("_")[-1].strip()
+    # validate format
+    try:
+        datetime.strptime(date_part, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError(f"Invalid date in filename: {filename} -> extracted '{date_part}' (expected YYYY-MM-DD)")
+    return date_part
+
+
+def date_to_timestamp(date_str: str) -> int:
+    dt = datetime.strptime(date_str, "%Y-%m-%d")
+    # epoch seconds at midnight local
+    return int(dt.timestamp())
+
+
+# ---------- main ----------
+def main():
+    summary_files = glob.glob(os.path.join(DATA_DIR, "*_summary.csv"))
+    nonsummary_files = [f for f in glob.glob(os.path.join(DATA_DIR, "*.csv")) if "_summary" not in f]
+
+    # --- Summary registry & metrics ---
+    summary_registry = CollectorRegistry()
+
+    g_summary_avg = Gauge(
+        "bp_summary_new_average_duration_seconds",
+        "Average Duration (summary)",
+        ["job_details", "file_name", "file_date", "file_timestamp"],
+        registry=summary_registry,
+    )
+    g_summary_total_trades = Gauge(
+        "bp_summary_new_total_trades",
+        "Total trades (summary)",
+        ["job_details", "file_name", "file_date", "file_timestamp"],
+        registry=summary_registry,
+    )
+    g_summary_job_count = Gauge(
+        "bp_summary_new_job_count",
+        "Job count (summary)",
+        ["job_details", "file_name", "file_date", "file_timestamp"],
+        registry=summary_registry,
+    )
+
+    # load and push summary rows (per-row labels kept)
+    for file in summary_files:
+        file_name = os.path.basename(file)
+        file_date = extract_file_date(file_name)
+        file_ts = str(date_to_timestamp(file_date))
+        df = pd.read_csv(file)
+        # ensure expected columns exist
+        for _, row in df.iterrows():
+            job_details = str(row.get("Job Details", "")).strip()
+            # numeric parsing with safe fallback
+            try:
+                avg_dur = float(row.get("Average Duration", 0) or 0)
+            except Exception:
+                avg_dur = 0.0
+            try:
+                total_trades = float(row.get("Total Trades", 0) or 0)
+            except Exception:
+                total_trades = 0.0
+            try:
+                job_count = float(row.get("JobCount", 0) or 0)
+            except Exception:
+                job_count = 0.0
+
+            g_summary_avg.labels(job_details, file_name, file_date, file_ts).set(avg_dur)
+            g_summary_total_trades.labels(job_details, file_name, file_date, file_ts).set(total_trades)
+            g_summary_job_count.labels(job_details, file_name, file_date, file_ts).set(job_count)
+
+    # push summary job
+    if summary_files:
+        push_to_gateway(PUSHGATEWAY_URL, job=SUMMARY_JOB, registry=summary_registry)
+        print(f"Pushed summary job '{SUMMARY_JOB}' -> {len(summary_files)} files")
+    else:
+        print("No summary files found to push.")
+
+    # --- Non-summary registry & metrics ---
+    nonsummary_registry = CollectorRegistry()
+
+    g_ns_duration = Gauge(
+        "bp_non_summary_new_duration_seconds",
+        "Duration (non-summary)",
+        ["bp_name", "thread_id", "job_details", "file_name", "file_date", "file_timestamp"],
+        registry=nonsummary_registry,
+    )
+    g_ns_no_trades = Gauge(
+        "bp_non_summary_new_no_of_trades",
+        "No of trades (non-summary)",
+        ["bp_name", "thread_id", "job_details", "file_name", "file_date", "file_timestamp"],
+        registry=nonsummary_registry,
+    )
+    g_ns_dpt = Gauge(
+        "bp_non_summary_new_duration_per_trade_seconds",
+        "Duration per trade (non-summary)",
+        ["bp_name", "thread_id", "job_details", "file_name", "file_date", "file_timestamp"],
+        registry=nonsummary_registry,
+    )
+
+    for file in nonsummary_files:
+        file_name = os.path.basename(file)
+        file_date = extract_file_date(file_name)
+        file_ts = str(date_to_timestamp(file_date))
+        df = pd.read_csv(file)
+        for _, row in df.iterrows():
+            bp_name = str(row.get("BP NAME", "")).strip()
+            thread_id = str(row.get("Thread ID", "")).strip()
+            job_details = str(row.get("JobDetails", "") or row.get("Job Details", "")).strip()
+            try:
+                dur = float(row.get("Duration", 0) or 0)
+            except Exception:
+                dur = 0.0
+            try:
+                no_trades = float(row.get("No of trades", 0) or 0)
+            except Exception:
+                no_trades = 0.0
+            try:
+                dpt = float(row.get("DurationPerTrade", 0) or 0)
+            except Exception:
+                dpt = 0.0
+
+            g_ns_duration.labels(bp_name, thread_id, job_details, file_name, file_date, file_ts).set(dur)
+            g_ns_no_trades.labels(bp_name, thread_id, job_details, file_name, file_date, file_ts).set(no_trades)
+            g_ns_dpt.labels(bp_name, thread_id, job_details, file_name, file_date, file_ts).set(dpt)
+
+    if nonsummary_files:
+        push_to_gateway(PUSHGATEWAY_URL, job=NONSUMMARY_JOB, registry=nonsummary_registry)
+        print(f"Pushed non-summary job '{NONSUMMARY_JOB}' -> {len(nonsummary_files)} files")
+    else:
+        print("No non-summary files found to push.")
+
+
+if __name__ == "__main__":
+    main()
