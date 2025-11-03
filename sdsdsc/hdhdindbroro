@@ -1,0 +1,92 @@
+import os
+import json
+import logging
+from datetime import datetime, timedelta
+import shutil
+import ctypes
+
+# ----- Load Config -----
+with open("config.json", "r") as f:
+    config = json.load(f)
+
+BASE_PATH = config["share_path"]
+RETENTION_DAYS = config["retention_days"]
+
+# ----- Logging -----
+log_filename = f"cleanup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+logging.basicConfig(
+    filename=log_filename,
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+def get_total_free_space(path):
+    free_bytes = ctypes.c_ulonglong(0)
+    total_bytes = ctypes.c_ulonglong(0)
+    ctypes.windll.kernel32.GetDiskFreeSpaceExW(
+        ctypes.c_wchar_p(path), None, ctypes.byref(total_bytes), ctypes.byref(free_bytes)
+    )
+    return total_bytes.value, free_bytes.value
+
+total_before, free_before = get_total_free_space(BASE_PATH)
+
+cutoff_time = datetime.now() - timedelta(days=RETENTION_DAYS)
+
+deleted_space_bytes = 0
+
+# ----- Walk from deepest folders upwards -----
+for root, dirs, files in os.walk(BASE_PATH, topdown=False):
+
+    # Delete old files
+    for file in files:
+        file_path = os.path.join(root, file)
+        try:
+            mtime = datetime.fromtimestamp(os.path.getmtime(file_path))
+            if mtime < cutoff_time:
+                size = os.path.getsize(file_path)
+                os.remove(file_path)
+                deleted_space_bytes += size
+                logging.info(f"Deleted old file: {file_path} ({size/1024:.2f} KB)")
+        except Exception as e:
+            logging.error(f"Error deleting file {file_path}: {e}")
+
+    # Decide folder deletion
+    try:
+        # If folder still has files/subfolders, evaluate age
+        if not os.listdir(root):  # Folder is empty
+            folder_mtime = datetime.fromtimestamp(os.path.getmtime(root))
+
+            if folder_mtime < cutoff_time:
+                shutil.rmtree(root)
+                logging.info(f"Deleted empty old folder: {root}")
+        else:
+            # Check if *all* remaining files and subfolders are older
+            delete_folder = True
+
+            for item in os.listdir(root):
+                item_path = os.path.join(root, item)
+                mtime = datetime.fromtimestamp(os.path.getmtime(item_path))
+                if mtime >= cutoff_time:  # Something new exists → keep folder
+                    delete_folder = False
+                    break
+
+            if delete_folder:
+                size_before = sum(os.path.getsize(os.path.join(dp, f)) 
+                                  for dp, dn, fn in os.walk(root) for f in fn)
+                shutil.rmtree(root)
+                deleted_space_bytes += size_before
+                logging.info(f"Deleted old folder: {root} ({size_before/1024:.2f} KB)")
+
+    except Exception as e:
+        logging.error(f"Error processing folder {root}: {e}")
+
+# ----- Final Space Info -----
+total_after, free_after = get_total_free_space(BASE_PATH)
+
+logging.info(f"Total Space Before: {total_before/1024/1024/1024:.2f} GB")
+logging.info(f"Free Space Before: {free_before/1024/1024/1024:.2f} GB")
+logging.info(f"Total Space After: {total_after/1024/1024/1024:.2f} GB")
+logging.info(f"Free Space After: {free_after/1024/1024/1024:.2f} GB")
+logging.info(f"Space Reclaimed: {deleted_space_bytes/1024/1024:.2f} MB")
+
+print(f"✅ Cleanup Completed. Log saved as: {log_filename}")
