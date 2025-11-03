@@ -1,0 +1,77 @@
+import os
+import json
+import logging
+from datetime import datetime, timedelta
+import shutil
+import ctypes
+
+# ----- Load Config -----
+with open("config.json", "r") as f:
+    config = json.load(f)
+
+BASE_PATH = config["share_path"]
+RETENTION_DAYS = config["retention_days"]
+
+# ----- Logging with timestamped filename -----
+log_filename = f"cleanup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+logging.basicConfig(
+    filename=log_filename,
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+def get_disk_usage(path):
+    free = ctypes.c_ulonglong(0)
+    total = ctypes.c_ulonglong(0)
+    ctypes.windll.kernel32.GetDiskFreeSpaceExW(
+        ctypes.c_wchar_p(path), None, ctypes.byref(total), ctypes.byref(free)
+    )
+    return total.value, free.value
+
+total_before, free_before = get_disk_usage(BASE_PATH)
+
+cutoff_time = datetime.now() - timedelta(days=RETENTION_DAYS)
+deleted_space = 0
+
+logging.info(f"Cleanup Start | Path: {BASE_PATH} | Retention: {RETENTION_DAYS} days")
+
+# Walk bottom-up so subfolders get removed before parents
+for root, dirs, files in os.walk(BASE_PATH, topdown=False):
+
+    # Skip the root itself (do not delete base directory)
+    if root == BASE_PATH:
+        continue
+
+    try:
+        # Use creation time (Windows) — does NOT change when files change
+        folder_ctime = datetime.fromtimestamp(os.path.getctime(root))
+
+        # Compare only folder creation date
+        if folder_ctime < cutoff_time:
+            # Calculate folder size before deletion
+            size = 0
+            for dp, dn, fn in os.walk(root):
+                for f in fn:
+                    try:
+                        size += os.path.getsize(os.path.join(dp, f))
+                    except:
+                        pass
+
+            shutil.rmtree(root, ignore_errors=True)
+            deleted_space += size
+
+            logging.info(f"Deleted Folder: {root} | Age: {folder_ctime} | Reclaimed: {size/1024/1024:.2f} MB")
+
+    except Exception as e:
+        logging.error(f"Error processing {root}: {e}")
+
+# ----- Space Report -----
+total_after, free_after = get_disk_usage(BASE_PATH)
+
+logging.info(f"Total Space Before: {total_before/1024/1024/1024:.2f} GB")
+logging.info(f"Free Space Before:  {free_before/1024/1024/1024:.2f} GB")
+logging.info(f"Free Space After:   {free_after/1024/1024/1024:.2f} GB")
+logging.info(f"Space Reclaimed:    {deleted_space/1024/1024:.2f} MB")
+logging.info("✅ Cleanup completed successfully.")
+
+print(f"✅ Cleanup completed. Log saved as: {log_filename}")
