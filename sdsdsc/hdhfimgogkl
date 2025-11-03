@@ -1,0 +1,59 @@
+import os
+import json
+import time
+import logging
+from datetime import datetime, timedelta
+import shutil
+
+# Setup Logging
+logging.basicConfig(
+    filename="cleanup_folders.log",
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+def load_config(config_file):
+    with open(config_file, 'r') as f:
+        return json.load(f)
+
+def delete_old_items(base_path, retention_days):
+    now = time.time()
+    cutoff_time = now - (retention_days * 86400)  # convert days to seconds
+
+    logging.info(f"Starting cleanup: Base Path = {base_path}, Retention = {retention_days} days")
+
+    if not os.path.exists(base_path):
+        logging.error(f"Base path does not exist: {base_path}")
+        return
+
+    # Walk bottom-up to ensure files deleted first
+    for root, dirs, files in os.walk(base_path, topdown=False):
+
+        # --- Clean Files ---
+        for file_name in files:
+            file_path = os.path.join(root, file_name)
+            try:
+                if os.path.getmtime(file_path) < cutoff_time:
+                    logging.info(f"Deleting file: {file_path}")
+                    os.remove(file_path)
+            except Exception as e:
+                logging.error(f"Error deleting file {file_path}: {e}")
+
+        # --- Clean Folders ---
+        for dir_name in dirs:
+            dir_path = os.path.join(root, dir_name)
+            try:
+                # If folder itself is older than retention → delete entire folder
+                if os.path.getmtime(dir_path) < cutoff_time:
+                    logging.info(f"Deleting folder and all contents: {dir_path}")
+                    shutil.rmtree(dir_path, ignore_errors=True)
+            except Exception as e:
+                logging.error(f"Error deleting folder {dir_path}: {e}")
+
+    logging.info("Cleanup completed successfully.")
+
+if __name__ == "__main__":
+    config = load_config("config.json")
+    base_path = config.get("base_path")
+    retention_days = int(config.get("retention_days", 30))
+    delete_old_items(base_path, retention_days)
