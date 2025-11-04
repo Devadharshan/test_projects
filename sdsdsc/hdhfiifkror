@@ -1,0 +1,131 @@
+import os
+import re
+import pandas as pd
+from datetime import datetime
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# ---------------------------
+# CONFIG
+# ---------------------------
+DATA_FOLDER = r"C:\Path\To\Your\Folder"
+PUSHGATEWAY_URL = "http://localhost:9091"
+
+# ---------------------------
+# SAFE CSV READER
+# ---------------------------
+def read_csv_safely(path):
+    try:
+        return pd.read_csv(path, encoding="utf-8")
+    except UnicodeDecodeError:
+        return pd.read_csv(path, encoding="latin-1")
+
+# ---------------------------
+# EXTRACT DATE FROM FILENAME
+# ---------------------------
+def extract_date_from_filename(filename):
+    match = re.search(r"(\d{4}-\d{2}-\d{2})", filename)
+    if match:
+        try:
+            return datetime.strptime(match.group(1), "%Y-%m-%d").date()
+        except:
+            return None
+    return None
+
+# ---------------------------
+# LOAD FILES
+# ---------------------------
+summary_frames = []
+non_summary_frames = []
+
+for file in os.listdir(DATA_FOLDER):
+    if not file.lower().endswith(".csv"):
+        continue
+
+    full_path = os.path.join(DATA_FOLDER, file)
+    df = read_csv_safely(full_path)
+
+    df.columns = [c.strip().replace(" ", "_").lower() for c in df.columns]
+    df["file_name"] = file
+    df["file_date"] = extract_date_from_filename(file)
+
+    if "_summary" in file.lower():
+        summary_frames.append(df)
+    else:
+        non_summary_frames.append(df)
+
+summary_df = pd.concat(summary_frames, ignore_index=True) if summary_frames else pd.DataFrame()
+non_summary_df = pd.concat(non_summary_frames, ignore_index=True) if non_summary_frames else pd.DataFrame()
+
+# ---------------------------
+# PUSH SUMMARY DATA
+# ---------------------------
+if not summary_df.empty:
+    registry = CollectorRegistry()
+
+    g_avg = Gauge("bp_summary_new_data_average_duration_seconds",
+                  "Average Duration",
+                  ["job_details", "file_name", "file_date"],
+                  registry=registry)
+
+    g_total = Gauge("bp_summary_new_data_total_trades",
+                    "Total Trades",
+                    ["job_details", "file_name", "file_date"],
+                    registry=registry)
+
+    g_count = Gauge("bp_summary_new_data_job_count",
+                    "Job Count",
+                    ["job_details", "file_name", "file_date"],
+                    registry=registry)
+
+    for _, row in summary_df.iterrows():
+        labels = {
+            "job_details": str(row.get("job_details", row.get("jobdetails", ""))),
+            "file_name": str(row.get("file_name", "")),
+            "file_date": str(row.get("file_date", ""))
+        }
+        g_avg.labels(**labels).set(float(row.get("average_duration", 0)))
+        g_total.labels(**labels).set(float(row.get("total_trades", 0)))
+        g_count.labels(**labels).set(float(row.get("jobcount", 0)))
+
+    push_to_gateway(PUSHGATEWAY_URL, job="bp_summary_new_data", registry=registry)
+    print("✅ Summary metrics pushed")
+
+
+# ---------------------------
+# PUSH NON-SUMMARY DATA
+# ---------------------------
+if not non_summary_df.empty:
+    registry = CollectorRegistry()
+
+    g_duration = Gauge("bp_non_summary_new_data_duration_seconds",
+                       "Duration",
+                       ["bp_name", "thread_id", "job_details", "file_name", "file_date"],
+                       registry=registry)
+
+    g_trades = Gauge("bp_non_summary_new_data_no_of_trades",
+                     "Trades",
+                     ["bp_name", "thread_id", "job_details", "file_name", "file_date"],
+                     registry=registry)
+
+    g_dpt = Gauge("bp_non_summary_new_data_duration_per_trade_seconds",
+                  "Duration Per Trade",
+                  ["bp_name", "thread_id", "job_details", "file_name", "file_date"],
+                  registry=registry)
+
+    for _, row in non_summary_df.iterrows():
+        labels = {
+            "bp_name": str(row.get("bp_name", "")),
+            "thread_id": str(row.get("thread_id", "")),
+            "job_details": str(row.get("jobdetails", row.get("job_details", ""))),
+            "file_name": str(row.get("file_name", "")),
+            "file_date": str(row.get("file_date", ""))
+        }
+        g_duration.labels(**labels).set(float(row.get("duration", 0)))
+        g_trades.labels(**labels).set(float(row.get("no_of_trades", 0)))
+        g_dpt.labels(**labels).set(float(row.get("durationpertrade", 0)))
+
+    push_to_gateway(PUSHGATEWAY_URL, job="bp_non_summary_new_data", registry=registry)
+    print("✅ Non-summary metrics pushed")
+
+
+print("\n🎯 DONE — Check metrics here: http://localhost:9091\n")
