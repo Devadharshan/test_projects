@@ -1,0 +1,114 @@
+import os
+import re
+import pandas as pd
+from datetime import datetime, timedelta
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# ---------------------------
+# CONFIG
+# ---------------------------
+DATA_FOLDER = r"C:\Users\YourName\Desktop\bp_files"
+PUSHGATEWAY_URL = "http://localhost:9091"
+
+# ---------------------------
+# SAFE CSV READER
+# ---------------------------
+def read_csv_safely(path):
+    try:
+        return pd.read_csv(path, encoding="utf-8")
+    except UnicodeDecodeError:
+        return pd.read_csv(path, encoding="latin-1")
+
+# ---------------------------
+# FILE DATE EXTRACTOR
+# ---------------------------
+def extract_date_from_filename(filename):
+    match = re.search(r"(\d{4}-\d{2}-\d{2})", filename)
+    if match:
+        return datetime.strptime(match.group(1), "%Y-%m-%d").date()
+    return None
+
+# ---------------------------
+# LOAD ALL FILES
+# ---------------------------
+summary_frames = []
+non_summary_frames = []
+
+for file in os.listdir(DATA_FOLDER):
+    if not file.lower().endswith(".csv"):
+        continue
+    
+    full_path = os.path.join(DATA_FOLDER, file)
+    df = read_csv_safely(full_path)
+    file_date = extract_date_from_filename(file)
+    
+    df["file_name"] = file
+    df["file_date"] = file_date
+
+    if "_summary" in file.lower():
+        # Normalize column names
+        df.columns = [col.strip().replace(" ", "_").lower() for col in df.columns]
+        summary_frames.append(df)
+    else:
+        df.columns = [col.strip().replace(" ", "_").lower() for col in df.columns]
+        non_summary_frames.append(df)
+
+summary_df = pd.concat(summary_frames, ignore_index=True) if summary_frames else pd.DataFrame()
+non_summary_df = pd.concat(non_summary_frames, ignore_index=True) if non_summary_frames else pd.DataFrame()
+
+# ---------------------------
+# FILTER DATE RANGES
+# ---------------------------
+today = datetime.now().date()
+yesterday = today - timedelta(days=1)
+last7 = today - timedelta(days=7)
+last30 = today - timedelta(days=30)
+
+def filter_range(df, start_date, end_date):
+    return df[(df["file_date"] >= start_date) & (df["file_date"] <= end_date)]
+
+summary_yesterday = filter_range(summary_df, yesterday, yesterday)
+summary_last7 = filter_range(summary_df, last7, today)
+summary_last30 = filter_range(summary_df, last30, today)
+
+non_summary_yesterday = filter_range(non_summary_df, yesterday, yesterday)
+non_summary_last7 = filter_range(non_summary_df, last7, today)
+non_summary_last30 = filter_range(non_summary_df, last30, today)
+
+# ---------------------------
+# AGGREGATE FUNCTION
+# ---------------------------
+def aggregate(df, value_col):
+    if df.empty:
+        return None, None, None, None
+    return df[value_col].sum(), df[value_col].mean(), df[value_col].min(), df[value_col].max()
+
+# ---------------------------
+# SEND METRICS TO PUSHGATEWAY
+# ---------------------------
+registry = CollectorRegistry()
+
+def push_metric(name, labels, value):
+    gauge = Gauge(name, name, labelnames=list(labels.keys()), registry=registry)
+    gauge.labels(**labels).set(value)
+
+# SUMMARY METRICS
+for col in ["average_duration", "total_trades", "jobcount"]:
+    if col in summary_df.columns:
+        values = {
+            "today_avg": summary_last7[col].mean(),
+            "today_sum": summary_last7[col].sum(),
+        }
+
+# NON SUMMARY METRICS
+for col in ["duration", "no_of_trades", "durationpertrade"]:
+    if col in non_summary_df.columns:
+        values = {
+            "today_avg": non_summary_last7[col].mean(),
+            "today_sum": non_summary_last7[col].sum(),
+        }
+
+# Push everything
+push_to_gateway(PUSHGATEWAY_URL, job="bp_data_combined", registry=registry)
+
+print("✅ All combined & aggregated metrics sent successfully.")
