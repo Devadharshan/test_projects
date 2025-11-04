@@ -1,0 +1,122 @@
+import os
+import pandas as pd
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+import re
+from datetime import datetime
+
+PUSHGATEWAY = "http://localhost:9091"
+
+def extract_date_from_filename(filename):
+    match = re.search(r'(\d{4}-\d{2}-\d{2})', filename)
+    if match:
+        return match.group(1)
+    return None
+
+def normalize_columns(df):
+    df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_")
+    return df
+
+def load_csv(file_path):
+    try:
+        df = pd.read_csv(file_path)
+        df = normalize_columns(df)
+        df["file_name"] = os.path.basename(file_path)
+        df["file_date"] = extract_date_from_filename(df["file_name"])
+        return df
+    except Exception as e:
+        print(f"Skipping file {file_path}: {e}")
+        return None
+
+def send_metrics(df, is_summary, registry):
+    raw_prefix = "new_data_summary_raw" if is_summary else "new_data_non_summary_raw"
+
+    for _, row in df.iterrows():
+        labels = {
+            "jobdetails": row.get("jobdetails", "unknown"),
+            "bp_name": row.get("bp_name", "unknown"),
+            "thread_id": row.get("thread_id", "none"),
+            "file_date": str(row.get("file_date", "unknown")),
+            "file_name": str(row.get("file_name", "unknown"))
+        }
+
+        if "duration" in row:
+            g = Gauge(f"{raw_prefix}_duration_seconds", "", labels.keys(), registry=registry)
+            g.labels(**labels).set(float(row["duration"]))
+
+        if "no_of_trades" in row:
+            g = Gauge(f"{raw_prefix}_no_of_trades", "", labels.keys(), registry=registry)
+            g.labels(**labels).set(float(row["no_of_trades"]))
+
+def send_aggregated_metrics(df, is_summary, registry):
+    agg_prefix = "new_data_summary_agg" if is_summary else "new_data_non_summary_agg"
+    grouped = df.groupby(["jobdetails", "bp_name"])
+
+    for (jobdetails, bp_name), group in grouped:
+        labels = {"jobdetails": jobdetails, "bp_name": bp_name}
+
+        g = Gauge(f"{agg_prefix}_avg_duration_seconds", "", labels.keys(), registry=registry)
+        g.labels(**labels).set(group["duration"].mean())
+
+        g = Gauge(f"{agg_prefix}_max_duration_seconds", "", labels.keys(), registry=registry)
+        g.labels(**labels).set(group["duration"].max())
+
+        g = Gauge(f"{agg_prefix}_min_duration_seconds", "", labels.keys(), registry=registry)
+        g.labels(**labels).set(group["duration"].min())
+
+        g = Gauge(f"{agg_prefix}_total_trades", "", labels.keys(), registry=registry)
+        g.labels(**labels).set(group["no_of_trades"].sum())
+
+def send_daily_trends(df, is_summary, registry):
+    trend_prefix = "new_data_summary_daily" if is_summary else "new_data_non_summary_daily"
+
+    grouped = df.groupby(["jobdetails", "bp_name", "file_date"])
+
+    for (jobdetails, bp_name, file_date), group in grouped:
+        labels = {"jobdetails": jobdetails, "bp_name": bp_name, "file_date": file_date}
+
+        g = Gauge(f"{trend_prefix}_average_duration_seconds", "", labels.keys(), registry=registry)
+        g.labels(**labels).set(group["duration"].mean())
+
+        g = Gauge(f"{trend_prefix}_total_trades", "", labels.keys(), registry=registry)
+        g.labels(**labels).set(group["no_of_trades"].sum())
+
+        g = Gauge(f"{trend_prefix}_job_count", "", labels.keys(), registry=registry)
+        g.labels(**labels).set(len(group))
+
+def main(directory):
+    all_summary = []
+    all_non_summary = []
+
+    for file in os.listdir(directory):
+        if not file.endswith(".csv"):
+            continue
+
+        file_path = os.path.join(directory, file)
+        df = load_csv(file_path)
+        if df is None:
+            continue
+
+        if "summary" in file.lower():
+            all_summary.append(df)
+        else:
+            all_non_summary.append(df)
+
+    if all_summary:
+        df_summary = pd.concat(all_summary, ignore_index=True)
+        registry = CollectorRegistry()
+        send_metrics(df_summary, True, registry)
+        send_aggregated_metrics(df_summary, True, registry)
+        send_daily_trends(df_summary, True, registry)
+        push_to_gateway(PUSHGATEWAY, job="summary_data", registry=registry)
+
+    if all_non_summary:
+        df_non_summary = pd.concat(all_non_summary, ignore_index=True)
+        registry = CollectorRegistry()
+        send_metrics(df_non_summary, False, registry)
+        send_aggregated_metrics(df_non_summary, False, registry)
+        send_daily_trends(df_non_summary, False, registry)
+        push_to_gateway(PUSHGATEWAY, job="non_summary_data", registry=registry)
+
+
+if __name__ == "__main__":
+    main(".")
