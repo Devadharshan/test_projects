@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+"""
+push_bp_all_metrics.py
+
+- Reads CSVs (summary & non-summary) from DATA_FOLDER
+- Pushes raw row metrics:
+    - job: bp_summary_raw
+    - job: bp_non_summary_raw
+- Computes aggregated stats (avg, sum, min, max) per group for windows:
+    - today, yesterday, last_7_days, last_30_days
+  and pushes them to:
+    - job: bp_summary_stats
+    - job: bp_non_summary_stats
+
+Edit DATA_FOLDER and run.
+"""
+import os
+import re
+import math
+import pandas as pd
+from datetime import datetime, timedelta
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# -------------- CONFIG --------------
+DATA_FOLDER = r"C:\Path\To\Your\Folder"   # <- set this
+PUSHGATEWAY = "http://localhost:9091"
+
+# Jobs
+JOB_SUMMARY_RAW = "bp_summary_raw"
+JOB_NON_SUMMARY_RAW = "bp_non_summary_raw"
+JOB_SUMMARY_STATS = "bp_summary_stats"
+JOB_NON_SUMMARY_STATS = "bp_non_summary_stats"
+
+# -------------- HELPERS --------------
+def read_csv_safely(path):
+    try:
+        return pd.read_csv(path, encoding="utf-8")
+    except UnicodeDecodeError:
+        return pd.read_csv(path, encoding="latin-1")
+    except Exception as e:
+        raise
+
+def extract_date_from_filename(fname):
+    """Find last YYYY-MM-DD in filename; return date object or None"""
+    m = re.findall(r"(\d{4}-\d{2}-\d{2})", fname)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m[-1], "%Y-%m-%d").date()
+    except:
+        return None
+
+def clean_label(v):
+    if v is None:
+        return "unknown"
+    s = str(v).strip()
+    if s == "":
+        return "unknown"
+    # replace problematic chars
+    s = re.sub(r'[^A-Za-z0-9_:./@-]', '_', s)
+    return s
+
+def safe_float(x):
+    if x is None or (isinstance(x, float) and math.isnan(x)):
+        return None
+    try:
+        return float(str(x).replace(",", ""))
+    except:
+        return None
+
+def date_in_range(d, start, end):
+    return d is not None and start <= d <= end
+
+# -------------- LOAD FILES --------------
+summary_rows = []
+non_summary_rows = []
+
+for fname in os.listdir(DATA_FOLDER):
+    if not fname.lower().endswith(".csv"):
+        continue
+    full = os.path.join(DATA_FOLDER, fname)
+    try:
+        df = read_csv_safely(full)
+    except Exception as e:
+        print(f"Skipping unreadable file {fname}: {e}")
+        continue
+
+    # normalize column names: strip, lower, replace spaces with underscore
+    df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+
+    file_date = extract_date_from_filename(fname)
+    # attach file metadata
+    df["file_name"] = fname
+    df["file_date"] = file_date
+
+    # decide summary vs non-summary based on presence of "summary" in filename
+    if "_summary" in fname.lower():
+        summary_rows.append(df)
+    else:
+        non_summary_rows.append(df)
+
+# concat
+summary_df = pd.concat(summary_rows, ignore_index=True) if summary_rows else pd.DataFrame()
+non_summary_df = pd.concat(non_summary_rows, ignore_index=True) if non_summary_rows else pd.DataFrame()
+
+# -------------- TIME WINDOWS --------------
+today = datetime.now().date()
+yesterday = today - timedelta(days=1)
+last7_start = today - timedelta(days=6)   # last 7 days including today
+last30_start = today - timedelta(days=29) # last 30 days including today
+
+# -------------- PUSH RAW ROW METRICS --------------
+# Summary raw: push each row with labels: job_details, file_name, file_date
+if not summary_df.empty:
+    reg = CollectorRegistry()
+    # Gauges
+    g_avg = Gauge("new_data_summary_raw_average_duration_seconds", "raw average duration", ["job_details", "file_name", "file_date"], registry=reg)
+    g_total = Gauge("new_data_summary_raw_total_trades", "raw total trades", ["job_details", "file_name", "file_date"], registry=reg)
+    g_count = Gauge("new_data_summary_raw_job_count", "raw job count", ["job_details", "file_name", "file_date"], registry=reg)
+
+    for _, r in summary_df.iterrows():
+        jd = clean_label(r.get("job_details") or r.get("job details") or r.get("jobdetails"))
+        fn = clean_label(r.get("file_name"))
+        fd = clean_label(r.get("file_date") or "")
+        # set values safely
+        v_avg = safe_float(r.get("average_duration") or r.get("average duration"))
+        v_total = safe_float(r.get("total_trades") or r.get("total trades"))
+        v_count = safe_float(r.get("jobcount") or r.get("job_count"))
+
+        if v_avg is not None:
+            g_avg.labels(jd, fn, fd).set(v_avg)
+        else:
+            g_avg.labels(jd, fn, fd).set(0.0)
+        g_total.labels(jd, fn, fd).set(v_total if v_total is not None else 0.0)
+        g_count.labels(jd, fn, fd).set(v_count if v_count is not None else 0.0)
+
+    push_to_gateway(PUSHGATEWAY, job=JOB_SUMMARY_RAW, registry=reg)
+    print("Pushed raw summary rows -> job:", JOB_SUMMARY_RAW)
+else:
+    print("No summary rows to push (raw).")
+
+# Non-summary raw: labels: bp_name, thread_id, job_id, jobdetails, file_name, file_date
+if not non_summary_df.empty:
+    reg = CollectorRegistry()
+    g_dur = Gauge("new_data_non_summary_raw_duration_seconds", "raw duration", ["bp_name", "thread_id", "job_id", "job_details", "file_name", "file_date"], registry=reg)
+    g_trades = Gauge("new_data_non_summary_raw_no_of_trades", "raw no of trades", ["bp_name", "thread_id", "job_id", "job_details", "file_name", "file_date"], registry=reg)
+    g_dpt = Gauge("new_data_non_summary_raw_duration_per_trade_seconds", "raw duration per trade", ["bp_name", "thread_id", "job_id", "job_details", "file_name", "file_date"], registry=reg)
+
+    for _, r in non_summary_df.iterrows():
+        bp = clean_label(r.get("bp_name") or r.get("bp name") or r.get("bp"))
+        thread = clean_label(r.get("thread_id") or r.get("thread id") or r.get("thread"))
+        jobid = clean_label(r.get("job_id") or r.get("job id") or r.get("job"))
+        jd = clean_label(r.get("jobdetails") or r.get("job_details") or r.get("job details"))
+        fn = clean_label(r.get("file_name"))
+        fd = clean_label(r.get("file_date") or "")
+
+        v_dur = safe_float(r.get("duration"))
+        v_tr = safe_float(r.get("no_of_trades") or r.get("no of trades"))
+        v_dpt = safe_float(r.get("durationpertrade") or r.get("duration_per_trade") or (v_dur / v_tr if v_dur and v_tr else None))
+
+        g_dur.labels(bp, thread, jobid, jd, fn, fd).set(v_dur if v_dur is not None else 0.0)
+        g_trades.labels(bp, thread, jobid, jd, fn, fd).set(v_tr if v_tr is not None else 0.0)
+        g_dpt.labels(bp, thread, jobid, jd, fn, fd).set(v_dpt if v_dpt is not None else 0.0)
+
+    push_to_gateway(PUSHGATEWAY, job=JOB_NON_SUMMARY_RAW, registry=reg)
+    print("Pushed raw non-summary rows -> job:", JOB_NON_SUMMARY_RAW)
+else:
+    print("No non-summary rows to push (raw).")
+
+# -------------- AGGREGATED STATS (per grouping) --------------
+# We'll create metrics with labels including group identifiers and time-window label.
+def emit_summary_stats(df):
+    """
+    For summary: group by job_details.
+    For each group and each window (today,yesterday,last7,last30):
+      - push avg/sum/min/max for (average_duration, total_trades, jobcount)
+    Metric names format:
+      new_data_summary_stats_{field}_seconds{?}_window{stat}
+    We'll expose metrics like:
+      new_data_summary_stats_average_duration_seconds{job_details="X", window="last_7_days", stat="avg"}  12.3
+    """
+    if df.empty:
+        return
+
+    # columns normalized earlier to lower + underscores
+    groups = df.groupby(df["job_details"].fillna("unknown").astype(str))
+
+    reg = CollectorRegistry()
+    # Define gauges once per field; labelnames: job_details,window,stat
+    fields = [
+        ("average_duration", "seconds"),
+        ("total_trades", ""),  # unitless
+        ("jobcount", "")
+    ]
+    gauges = {}
+    for fld, unit in fields:
+        name = f"new_data_summary_stats_{fld}"
+        gauges[fld] = Gauge(name, f"summary agg {fld}", ["job_details", "window", "stat"], registry=reg)
+
+    # process groups
+    for job_details, group in groups:
+        # group might have file_date column; filter per window
+        for window_name, start_date in (("today", today), ("yesterday", yesterday), ("last_7_days", last7_start), ("last_30_days", last30_start)):
+            if window_name == "today":
+                sel = group[group["file_date"] == today]
+            elif window_name == "yesterday":
+                sel = group[group["file_date"] == yesterday]
+            elif window_name == "last_7_days":
+                sel = group[group["file_date"].apply(lambda d: d is not None and d >= last7_start and d <= today)]
+            else:  # last_30_days
+                sel = group[group["file_date"].apply(lambda d: d is not None and d >= last30_start and d <= today)]
+
+            # for each field compute stats
+            for fld, _ in fields:
+                if fld not in sel.columns or sel.empty:
+                    avg = mn = mx = s = 0.0
+                else:
+                    vals = [safe_float(x) for x in sel[fld] if safe_float(x) is not None]
+                    if vals:
+                        avg = sum(vals) / len(vals)
+                        mn = min(vals)
+                        mx = max(vals)
+                        s = sum(vals)
+                    else:
+                        avg = mn = mx = s = 0.0
+
+                g = gauges[fld]
+                # set labels
+                g.labels(clean_label(job_details), window_name, "avg").set(avg)
+                g.labels(clean_label(job_details), window_name, "min").set(mn)
+                g.labels(clean_label(job_details), window_name, "max").set(mx)
+                g.labels(clean_label(job_details), window_name, "sum").set(s)
+
+    push_to_gateway(PUSHGATEWAY, job=JOB_SUMMARY_STATS, registry=reg)
+    print("Pushed summary aggregated stats -> job:", JOB_SUMMARY_STATS)
+
+
+def emit_non_summary_stats(df):
+    """
+    For non-summary: group by bp_name, thread_id, job_id, jobdetails (as requested).
+    For each group and each window compute avg/sum/min/max for duration, no_of_trades, durationpertrade.
+    Push to JOB_NON_SUMMARY_STATS.
+    Note: although earlier we removed thread_id from long-term trends, user requested to compute by (bp,thread,jobdetails,jobid)
+    so we follow that here.
+    """
+    if df.empty:
+        return
+
+    # ensure grouping columns exist
+    df["bp_name"] = df.get("bp_name") .astype(str)
+    df["thread_id"] = df.get("thread_id").astype(str)
+    df["job_id"] = df.get("job_id").astype(str) if "job_id" in df.columns else df.get("job id", "").astype(str)
+    df["job_details"] = df.get("jobdetails") .astype(str)
+
+    grouped = df.groupby(["bp_name", "thread_id", "job_id", "job_details"])
+
+    reg = CollectorRegistry()
+    fields = [
+        ("duration", "seconds"),
+        ("no_of_trades", ""),
+        ("durationpertrade", "seconds")
+    ]
+    gauges = {}
+    for fld, unit in fields:
+        name = f"new_data_non_summary_stats_{fld}"
+        gauges[fld] = Gauge(name, f"non-summary agg {fld}", ["bp_name", "thread_id", "job_id", "job_details", "window", "stat"], registry=reg)
+
+    for (bp, thread, jobid, jobd), group in grouped:
+        for window_name in ("today", "yesterday", "last_7_days", "last_30_days"):
+            if window_name == "today":
+                sel = group[group["file_date"] == today]
+            elif window_name == "yesterday":
+                sel = group[group["file_date"] == yesterday]
+            elif window_name == "last_7_days":
+                sel = group[group["file_date"].apply(lambda d: d is not None and d >= last7_start and d <= today)]
+            else:
+                sel = group[group["file_date"].apply(lambda d: d is not None and d >= last30_start and d <= today)]
+
+            for fld, _ in fields:
+                if fld not in sel.columns or sel.empty:
+                    avg = mn = mx = s = 0.0
+                else:
+                    vals = [safe_float(x) for x in sel[fld] if safe_float(x) is not None]
+                    if vals:
+                        avg = sum(vals) / len(vals)
+                        mn = min(vals)
+                        mx = max(vals)
+                        s = sum(vals)
+                    else:
+                        avg = mn = mx = s = 0.0
+
+                g = gauges[fld]
+                g.labels(clean_label(bp), clean_label(thread), clean_label(jobid), clean_label(jobd), window_name, "avg").set(avg)
+                g.labels(clean_label(bp), clean_label(thread), clean_label(jobid), clean_label(jobd), window_name, "min").set(mn)
+                g.labels(clean_label(bp), clean_label(thread), clean_label(jobid), clean_label(jobd), window_name, "max").set(mx)
+                g.labels(clean_label(bp), clean_label(thread), clean_label(jobid), clean_label(jobd), window_name, "sum").set(s)
+
+    push_to_gateway(PUSHGATEWAY, job=JOB_NON_SUMMARY_STATS, registry=reg)
+    print("Pushed non-summary aggregated stats -> job:", JOB_NON_SUMMARY_STATS)
+
+
+# Emit aggregated stats
+emit_summary_stats(summary_df)
+emit_non_summary_stats(non_summary_df)
+
+print("✅ All pushes complete. Visit http://localhost:9091 to inspect.")
