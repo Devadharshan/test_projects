@@ -1,0 +1,88 @@
+import os
+import pandas as pd
+from datetime import datetime
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# ===== CONFIG =====
+FOLDER = r"/path/to/your/folder"   # Change later
+PUSHGATEWAY = "http://localhost:9091"
+
+# Gauge name prefixes
+PREFIX_SUMMARY = "new_data_summary"
+PREFIX_NONSUM = "new_data_non_summary"
+
+
+def extract_date_from_filename(filename):
+    parts = filename.split("_")
+    date_str = parts[-1].replace(".csv", "").replace(".CSV", "")
+    return datetime.strptime(date_str, "%Y-%m-%d").date()
+
+
+def load_files(pattern):
+    files = [f for f in os.listdir(FOLDER) if pattern in f and f.endswith(".csv")]
+    df_list = []
+    for f in files:
+        try:
+            file_date = extract_date_from_filename(f)
+            temp = pd.read_csv(os.path.join(FOLDER, f))
+            temp["file_date"] = file_date
+            temp["file_name"] = f
+            df_list.append(temp)
+        except:
+            print(f"⚠️ Skipped invalid file: {f}")
+    return pd.concat(df_list, ignore_index=True) if df_list else pd.DataFrame()
+
+
+# ---------------- LOAD DATA ----------------
+summary_df = load_files("_summary")
+nonsum_df = load_files("_summary")  # Prevent accidental use — fixed below
+nonsum_df = load_files(".csv")
+nonsum_df = nonsum_df[nonsum_df["JOB ID"].notna()]  # filter non-summary
+
+
+# ---------------- AGGREGATE METRICS ----------------
+def push_aggregate_metrics(df, prefix, value_col):
+    registry = CollectorRegistry()
+    gauge = Gauge(f"{prefix}_agg_{value_col}", "Aggregated metrics",
+                  ["stat"], registry=registry)
+
+    gauge.labels(stat="avg").set(df[value_col].mean())
+    gauge.labels(stat="min").set(df[value_col].min())
+    gauge.labels(stat="max").set(df[value_col].max())
+    gauge.labels(stat="sum").set(df[value_col].sum())
+
+    push_to_gateway(PUSHGATEWAY, job=prefix+"_agg", registry=registry)
+    print(f"✅ Sent aggregated metrics for {prefix}")
+
+
+# For Summary: column is "Average Duration"
+push_aggregate_metrics(summary_df, PREFIX_SUMMARY, "Average Duration")
+
+# For Non-Summary: column is "Duration"
+push_aggregate_metrics(nonsum_df, PREFIX_NONSUM, "Duration")
+
+
+# ---------------- RAW ROW DATA ----------------
+def push_raw(df, prefix, value_col, label_cols):
+    registry = CollectorRegistry()
+    gauge = Gauge(f"{prefix}_raw_{value_col}", "Raw row-level data",
+                  label_cols, registry=registry)
+
+    for _, row in df.iterrows():
+        labels = [str(row[col]) for col in label_cols]
+        gauge.labels(*labels).set(row[value_col])
+
+    push_to_gateway(PUSHGATEWAY, job=prefix+"_raw", registry=registry)
+    print(f"✅ Sent raw data for {prefix}")
+
+
+# RAW Summary (Value = Average Duration)
+push_raw(summary_df, PREFIX_SUMMARY, "Average Duration",
+         ["Job Details", "file_date", "file_name"])
+
+# RAW Non Summary (Value = Duration) | Option B labels
+push_raw(nonsum_df, PREFIX_NONSUM, "Duration",
+         ["JobDetails", "BP NAME", "Thread ID", "file_date"])
+
+
+print("🎉 DONE! All metrics pushed.")
