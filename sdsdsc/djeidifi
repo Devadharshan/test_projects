@@ -1,0 +1,124 @@
+import os
+import glob
+import pandas as pd
+from datetime import datetime
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# ---------------- CONFIG ----------------
+FOLDER = r"C:\path\to\your\csv\folder"
+PUSHGATEWAY_URL = "http://localhost:9091"
+
+# Metric name prefix (new clean dataset)
+PREFIX_SUMMARY_RAW = "new_data_summary_raw"
+PREFIX_NON_SUMMARY_RAW = "new_data_non_summary_raw"
+
+PREFIX_SUMMARY_AGG = "new_data_summary_agg"
+PREFIX_NON_SUMMARY_AGG = "new_data_non_summary_agg"
+# ----------------------------------------
+
+
+def extract_file_date(filename):
+    """Extract last 10 characters before .csv → ensures reliability even with extra underscores."""
+    base = os.path.basename(filename).replace(".csv", "")
+    return base[-10:]  # always YYYY-MM-DD
+
+
+def normalize(col):
+    """Normalize column names: lower → replace spaces → remove double underscores."""
+    return col.strip().lower().replace(" ", "_").replace("__", "_")
+
+
+# Read all CSV files
+files = glob.glob(os.path.join(FOLDER, "*.csv"))
+
+summary_rows = []
+non_summary_rows = []
+
+for file in files:
+    file_date = extract_file_date(file)
+    try:
+        df = pd.read_csv(file)
+    except:
+        print(f"❌ Skipped unreadable file: {file}")
+        continue
+
+    # Normalize column names
+    df.columns = [normalize(c) for c in df.columns]
+
+    if "average_duration" in df.columns:  # summary file
+        df["file_date"] = file_date
+        df["file_name"] = os.path.basename(file)
+        summary_rows.append(df)
+
+    elif "duration" in df.columns and "jobdetails" in df.columns:  # non-summary file
+        df["file_date"] = file_date
+        df["file_name"] = os.path.basename(file)
+        non_summary_rows.append(df)
+
+    else:
+        print(f"⚠️ Skipped invalid file: {file}")
+
+
+# Combine data
+summary_df = pd.concat(summary_rows, ignore_index=True) if summary_rows else pd.DataFrame()
+non_summary_df = pd.concat(non_summary_rows, ignore_index=True) if non_summary_rows else pd.DataFrame()
+
+# Registry
+registry = CollectorRegistry()
+
+# ---------------- RAW SUMMARY DATA ----------------
+if not summary_df.empty:
+    g_avg = Gauge(f"{PREFIX_SUMMARY_RAW}_average_duration_seconds",
+                  "Raw average duration", ["job_details", "file_date", "file_name"], registry=registry)
+
+    g_trades = Gauge(f"{PREFIX_SUMMARY_RAW}_total_trades",
+                     "Raw total trades", ["job_details", "file_date", "file_name"], registry=registry)
+
+    g_jobcount = Gauge(f"{PREFIX_SUMMARY_RAW}_job_count",
+                       "Raw job count", ["job_details", "file_date", "file_name"], registry=registry)
+
+    for _, row in summary_df.iterrows():
+        g_avg.labels(row["job_details"], row["file_date"], row["file_name"]).set(row["average_duration"])
+        g_trades.labels(row["job_details"], row["file_date"], row["file_name"]).set(row["total_trades"])
+        g_jobcount.labels(row["job_details"], row["file_date"], row["file_name"]).set(row["jobcount"])
+
+# ---------------- RAW NON-SUMMARY DATA ----------------
+if not non_summary_df.empty:
+    g_dur = Gauge(f"{PREFIX_NON_SUMMARY_RAW}_duration_seconds",
+                  "Raw duration", ["jobdetails", "bp_name", "thread_id", "file_date"], registry=registry)
+
+    g_ntrades = Gauge(f"{PREFIX_NON_SUMMARY_RAW}_no_of_trades",
+                       "Raw number of trades", ["jobdetails", "bp_name", "thread_id", "file_date"], registry=registry)
+
+    g_dpt = Gauge(f"{PREFIX_NON_SUMMARY_RAW}_duration_per_trade_seconds",
+                  "Duration per trade", ["jobdetails", "bp_name", "thread_id", "file_date"], registry=registry)
+
+    for _, row in non_summary_df.iterrows():
+        g_dur.labels(row["jobdetails"], row["bp_name"], str(row["thread_id"]), row["file_date"]).set(row["duration"])
+        g_ntrades.labels(row["jobdetails"], row["bp_name"], str(row["thread_id"]), row["file_date"]).set(row["no_of_trades"])
+        g_dpt.labels(row["jobdetails"], row["bp_name"], str(row["thread_id"]), row["file_date"]).set(row["durationpertrade"])
+
+# ---------------- AGGREGATED METRICS ----------------
+def emit_agg(df, value_col, prefix, label):
+    """Emit aggregated metrics with stat = avg|min|max|sum"""
+    if df.empty: return
+    g = Gauge(f"{prefix}_{label}", f"Aggregated {label}", ["stat"], registry=registry)
+    g.labels("avg").set(df[value_col].mean())
+    g.labels("min").set(df[value_col].min())
+    g.labels("max").set(df[value_col].max())
+    g.labels("sum").set(df[value_col].sum())
+
+
+if not summary_df.empty:
+    emit_agg(summary_df, "average_duration", PREFIX_SUMMARY_AGG, "average_duration_seconds")
+    emit_agg(summary_df, "total_trades", PREFIX_SUMMARY_AGG, "total_trades")
+    emit_agg(summary_df, "jobcount", PREFIX_SUMMARY_AGG, "job_count")
+
+if not non_summary_df.empty:
+    emit_agg(non_summary_df, "duration", PREFIX_NON_SUMMARY_AGG, "duration_seconds")
+    emit_agg(non_summary_df, "no_of_trades", PREFIX_NON_SUMMARY_AGG, "no_of_trades")
+    emit_agg(non_summary_df, "durationpertrade", PREFIX_NON_SUMMARY_AGG, "duration_per_trade_seconds")
+
+# Push
+push_to_gateway(PUSHGATEWAY_URL, job="new_data_export", registry=registry)
+print("✅ Data pushed successfully to Pushgateway.")
