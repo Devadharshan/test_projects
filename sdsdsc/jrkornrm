@@ -1,0 +1,68 @@
+import os
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# =======================
+# CONFIGURE THESE VALUES
+# =======================
+SCAN_PATH = r"D:\logs"     # Directory to scan
+PUSHGATEWAY_URL = "http://localhost:9091"   # Pushgateway endpoint
+SIZE_THRESHOLD_MB = 800    # File size threshold
+# =======================
+
+
+def fast_scan(directory, size_threshold_mb):
+    large_files = []
+    threshold_bytes = size_threshold_mb * 1024 * 1024
+
+    stack = [directory]  # no recursion → faster
+
+    while stack:
+        current = stack.pop()
+
+        try:
+            with os.scandir(current) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            size = entry.stat().st_size  # much faster than getsize
+                            if size >= threshold_bytes:
+                                large_files.append((entry.path, size))
+                    except:
+                        pass
+        except:
+            pass
+
+    return large_files
+
+
+def push_metrics(large_files, pushgateway_url):
+    registry = CollectorRegistry()
+    gauge = Gauge(
+        'large_file_size_bytes',
+        'Size of files exceeding threshold',
+        ['filepath'],
+        registry=registry
+    )
+
+    for filepath, size in large_files:
+        gauge.labels(filepath=filepath).set(size)
+
+    push_to_gateway(pushgateway_url, job="windows_large_file_monitor", registry=registry)
+
+
+def main():
+    print(f"⚡ Fast scan started: {SCAN_PATH} (Threshold: {SIZE_THRESHOLD_MB} MB)")
+    large_files = fast_scan(SCAN_PATH, SIZE_THRESHOLD_MB)
+
+    if large_files:
+        print(f"📦 Found {len(large_files)} large files → pushing metrics...")
+        push_metrics(large_files, PUSHGATEWAY_URL)
+        print("✅ Metrics pushed to Pushgateway.")
+    else:
+        print("✅ No files exceeding threshold found.")
+
+
+if __name__ == "__main__":
+    main()
