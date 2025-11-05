@@ -1,0 +1,5 @@
+New-Service -Name "windows_exporter" `
+  -BinaryPathName "\"C:\Program Files\windows_exporter\windows_exporter.exe\" --collectors.enabled cpu,os,logical_disk,system,net,service,process,textfile --collector.textfile.directory=\"C:\Program Files\windows_exporter\textfile_collector\"" `
+  -DisplayName "Windows Exporter" `
+  -Description "Prometheus Windows Exporter with process monitoring + textfile metrics" `
+  -StartupType Automatic
