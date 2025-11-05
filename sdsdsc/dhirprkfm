@@ -1,0 +1,102 @@
+import os
+import json
+import logging
+from logging.handlers import RotatingFileHandler
+from datetime import datetime, timedelta
+import shutil
+import ctypes
+import sys
+
+# ----- Load Config -----
+with open("config.json", "r") as f:
+    config = json.load(f)
+
+PATH_CONFIGS = config["paths"]
+LOG_DIR = config["log_dir"]
+
+# Ensure log directory exists
+os.makedirs(LOG_DIR, exist_ok=True)
+
+log_filename = os.path.join(LOG_DIR, f"cleanup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+
+# ----- Logging Setup -----
+logger = logging.getLogger("cleanup_logger")
+logger.setLevel(logging.INFO)
+
+file_handler = RotatingFileHandler(log_filename, maxBytes=5_000_000, backupCount=10)
+file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+logger.addHandler(file_handler)
+
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
+logger.addHandler(console_handler)
+
+logger.info("==== Cleanup Started ====")
+
+# ----- Disk Space Helper -----
+def get_space(path):
+    free = ctypes.c_ulonglong(0)
+    total = ctypes.c_ulonglong(0)
+    ctypes.windll.kernel32.GetDiskFreeSpaceExW(
+        ctypes.c_wchar_p(path), None, ctypes.byref(total), ctypes.byref(free)
+    )
+    return total.value, free.value
+
+overall_deleted_space = 0
+
+# ----- Per Path Cleanup -----
+for entry_config in PATH_CONFIGS:
+    BASE_PATH = entry_config["path"]
+    RETENTION_DAYS = entry_config["retention_days"]
+
+    logger.info(f"\n---- Processing Path: {BASE_PATH} | Retention: {RETENTION_DAYS} days ----")
+
+    if not os.path.exists(BASE_PATH):
+        logger.error(f"Path Not Found: {BASE_PATH}")
+        continue
+
+    cutoff_date = datetime.now() - timedelta(days=RETENTION_DAYS)
+    total_before, free_before = get_space(BASE_PATH)
+    deleted_space = 0
+
+    for entry in os.scandir(BASE_PATH):
+        if entry.is_dir():
+            folder_name = entry.name.strip()
+
+            # Only delete folders named as YYYY-MM-DD
+            try:
+                folder_date = datetime.strptime(folder_name, "%Y-%m-%d")
+            except ValueError:
+                logger.info(f"Skipping folder (name not in date format): {entry.path}")
+                continue
+
+            if folder_date < cutoff_date:
+                size = 0
+                for dp, dn, fn in os.walk(entry.path):
+                    for f in fn:
+                        try:
+                            size += os.path.getsize(os.path.join(dp, f))
+                        except:
+                            pass
+
+                shutil.rmtree(entry.path, ignore_errors=True)
+                deleted_space += size
+                logger.info(
+                    f"Deleted: {entry.path} | Date: {folder_date.date()} | Reclaimed: {size/1024/1024:.2f} MB"
+                )
+            else:
+                logger.info(f"Kept: {entry.path} | Date: {folder_date.date()}")
+
+    total_after, free_after = get_space(BASE_PATH)
+
+    logger.info(f"Summary for {BASE_PATH}:")
+    logger.info(f"  Free Before: {free_before/1024/1024/1024:.2f} GB")
+    logger.info(f"  Free After:  {free_after/1024/1024/1024:.2f} GB")
+    logger.info(f"  Space Reclaimed: {deleted_space/1024/1024:.2f} MB")
+
+    overall_deleted_space += deleted_space
+
+logger.info(f"\n==== Cleanup Complete | Total Space Reclaimed: {overall_deleted_space/1024/1024:.2f} MB ====")
+logger.info(f"Log saved: {log_filename}")
+
+print(f"✅ Cleanup Completed. Log saved at: {log_filename}")
