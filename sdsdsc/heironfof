@@ -1,0 +1,120 @@
+import os
+import psutil
+import oracledb
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+import time
+
+# ------------------- CONFIG -------------------
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "windows_share_oracle_metrics"
+
+ORACLE_CLIENT_PATH = r"C:\oracle\instantclient_21_12"  # or "" if using thin mode
+ORACLE_DSN = "host:port/service"
+ORACLE_USERNAME = "username"
+ORACLE_PASSWORD = "password"
+
+ORACLE_QUERY = "SELECT * FROM restoration_logs"
+
+NETWORK_SHARES = [
+    r"Z:\\",
+    r"Y:\\"
+]
+
+LARGE_FILE_THRESHOLD_BYTES = 1 * 1024 * 1024 * 1024  # 1 GB
+
+
+# ------------------- FUNCTIONS -------------------
+def init_oracle():
+    if ORACLE_CLIENT_PATH:
+        try:
+            oracledb.init_oracle_client(lib_dir=ORACLE_CLIENT_PATH)
+        except oracledb.ProgrammingError:
+            pass
+
+
+def query_restoration_logs():
+    init_oracle()
+    conn = oracledb.connect(
+        user=ORACLE_USERNAME,
+        password=ORACLE_PASSWORD,
+        dsn=ORACLE_DSN
+    )
+    try:
+        cur = conn.cursor()
+        cur.execute(ORACLE_QUERY)
+        row = cur.fetchone()   # Only one row expected ✅
+        if row:
+            colnames = [d[0] for d in cur.description]
+            return dict(zip(colnames, row))
+        return None
+    finally:
+        cur.close()
+        conn.close()  # ✅ Explicitly close connection
+
+
+def get_large_files(path):
+    """Super fast top-level scan only."""
+    large = []
+    try:
+        for entry in os.listdir(path):
+            full = os.path.join(path, entry)
+            if os.path.isfile(full):
+                try:
+                    size = os.path.getsize(full)
+                    if size >= LARGE_FILE_THRESHOLD_BYTES:
+                        large.append((full, size))
+                except:
+                    pass
+    except:
+        pass
+    return large
+
+
+# ------------------- PROMETHEUS SETUP -------------------
+registry = CollectorRegistry()
+
+g_total = Gauge("network_share_total_gb", "Total share size GB", ["share"], registry=registry)
+g_free = Gauge("network_share_free_gb", "Free share size GB", ["share"], registry=registry)
+g_used = Gauge("network_share_used_gb", "Used share size GB", ["share"], registry=registry)
+
+g_large = Gauge("network_share_large_file_gb", "Large files (>1GB)", ["share", "filepath"], registry=registry)
+
+g_db_numeric = Gauge("restoration_logs_numeric_column", "Numeric values from restoration_logs", ["column"], registry=registry)
+g_db_time = Gauge("restoration_logs_restore_date_epoch", "RESTORE_DATE as epoch", registry=registry)
+
+g_run = Gauge("script_last_run_timestamp", "Last script execution time", registry=registry)
+
+
+# ------------------- MAIN -------------------
+for share in NETWORK_SHARES:
+    try:
+        usage = psutil.disk_usage(share)
+        g_total.labels(share).set(usage.total / (1024**3))
+        g_free.labels(share).set(usage.free / (1024**3))
+        g_used.labels(share).set(usage.used / (1024**3))
+
+        for filepath, size in get_large_files(share):
+            g_large.labels(share, filepath).set(size / (1024**3))
+
+    except Exception as e:
+        print(f"Error reading {share}: {e}")
+
+db_row = query_restoration_logs()
+
+if db_row:
+    for col, val in db_row.items():
+        if col.upper() == "RESTORE_DATE" and val:
+            try:
+                epoch = val.timestamp()
+            except:
+                epoch = time.mktime(val.timetuple())
+            g_db_time.set(epoch)
+
+        elif isinstance(val, (int, float)):
+            g_db_numeric.labels(col).set(val)
+
+g_run.set(time.time())
+
+push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+
+print("✅ Metrics pushed successfully.")
