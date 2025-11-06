@@ -1,0 +1,99 @@
+import os
+import psutil
+import oracledb
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+from datetime import datetime
+
+# ------------------- CONFIG -------------------
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "windows_share_oracle_metrics"
+
+ORACLE_CLIENT_PATH = r"C:\oracle\instantclient_21_12"
+ORACLE_DSN = "host:port/service"
+ORACLE_USERNAME = "username"
+ORACLE_PASSWORD = "password"
+
+ORACLE_QUERY = "SELECT * FROM restoration_logs"
+
+NETWORK_SHARES = [
+    r"Z:\\",
+    r"Y:\\"
+]
+
+
+# ------------------- FUNCTIONS -------------------
+def init_oracle():
+    if ORACLE_CLIENT_PATH:
+        try:
+            oracledb.init_oracle_client(lib_dir=ORACLE_CLIENT_PATH)
+        except:
+            pass
+
+
+def query_restoration_logs():
+    init_oracle()
+    conn = oracledb.connect(
+        user=ORACLE_USERNAME,
+        password=ORACLE_PASSWORD,
+        dsn=ORACLE_DSN
+    )
+    try:
+        cur = conn.cursor()
+        cur.execute(ORACLE_QUERY)
+        row = cur.fetchone()
+        if row:
+            colnames = [d[0] for d in cur.description]
+            return dict(zip(colnames, row))
+        return None
+    finally:
+        cur.close()
+        conn.close()
+
+
+# ------------------- PROMETHEUS METRICS -------------------
+registry = CollectorRegistry()
+
+g_free_pct = Gauge("network_share_free_percent", "Free share percentage", ["share"], registry=registry)
+g_used_pct = Gauge("network_share_used_percent", "Used share percentage", ["share"], registry=registry)
+
+g_db_numeric = Gauge("restoration_logs_numeric_column", "DB numeric fields", ["column"], registry=registry)
+g_db_info = Gauge("restoration_logs_info", "DB snapshot with human readable datetime", ["restore_date"], registry=registry)
+
+g_run_info = Gauge("script_last_run_info", "Timestamp of last run (human readable)", ["time"], registry=registry)
+
+
+# ------------------- MAIN -------------------
+for share in NETWORK_SHARES:
+    try:
+        usage = psutil.disk_usage(share)
+        free_pct = (usage.free / usage.total) * 100
+        used_pct = (usage.used / usage.total) * 100
+
+        g_free_pct.labels(share).set(free_pct)
+        g_used_pct.labels(share).set(used_pct)
+
+    except Exception as e:
+        print(f"[WARN] Error scanning share {share}: {e}")
+
+
+db = query_restoration_logs()
+if db:
+    restore_date = db.get("RESTORE_DATE")
+    if restore_date:
+        try:
+            restore_str = restore_date.strftime("%Y-%m-%d %H:%M:%S")
+        except:
+            restore_str = str(restore_date)
+        g_db_info.labels(restore_str).set(1)
+
+    for col, val in db.items():
+        if isinstance(val, (int, float)):
+            g_db_numeric.labels(col).set(val)
+
+
+run_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+g_run_info.labels(run_time).set(1)
+
+push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+
+print("✅ Metrics pushed successfully at", run_time)
