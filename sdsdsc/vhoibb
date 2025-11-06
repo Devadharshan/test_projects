@@ -1,0 +1,103 @@
+import os
+import psutil
+import cx_Oracle
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+import time
+
+# ------------------- CONFIG -------------------
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "windows_share_oracle_metrics"
+
+ORACLE_CLIENT_PATH = r"C:\oracle\instantclient_21_12"
+ORACLE_DSN = "host:port/service"
+ORACLE_USERNAME = "username"
+ORACLE_PASSWORD = "password"
+ORACLE_QUERY = "SELECT COUNT(*) FROM employees"
+
+NETWORK_SHARES = [
+    r"Z:\\",
+    r"Y:\\"
+]
+
+LARGE_FILE_THRESHOLD_BYTES = 1 * 1024 * 1024 * 1024   # 1GB
+
+# ------------------- FUNCTIONS -------------------
+def init_oracle():
+    try:
+        cx_Oracle.init_oracle_client(lib_dir=ORACLE_CLIENT_PATH)
+    except:
+        pass  # ignore if already initialized
+
+def query_oracle_value():
+    init_oracle()
+    conn = cx_Oracle.connect(ORACLE_USERNAME, ORACLE_PASSWORD, ORACLE_DSN)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(ORACLE_QUERY)
+        result = cursor.fetchone()[0]
+        return result
+    finally:
+        cursor.close()
+        conn.close()      # ✅ guaranteed close
+
+def get_disk_space(path):
+    usage = psutil.disk_usage(path)
+    total_gb = usage.total / (1024 ** 3)
+    free_gb = usage.free / (1024 ** 3)
+    used_gb = usage.used / (1024 ** 3)
+    return usage.total, usage.free, usage.used, total_gb, free_gb, used_gb
+
+def find_large_files(path):
+    large_files = []
+    for root, dirs, files in os.walk(path):
+        for f in files:
+            file_path = os.path.join(root, f)
+            try:
+                size = os.path.getsize(file_path)
+                if size >= LARGE_FILE_THRESHOLD_BYTES:
+                    large_files.append((file_path, size))
+            except:
+                pass
+    return large_files
+
+# ------------------- METRICS REGISTRY -------------------
+registry = CollectorRegistry()
+
+g_total = Gauge("network_share_total_gb", "Total share size (GB)", ["share"], registry=registry)
+g_free  = Gauge("network_share_free_gb", "Free share size (GB)", ["share"], registry=registry)
+g_used  = Gauge("network_share_used_gb", "Used share size (GB)", ["share"], registry=registry)
+
+g_large_file = Gauge("network_share_large_file_gb", "Files > threshold (GB)", ["share","filepath"], registry=registry)
+
+g_db_value = Gauge("oracle_query_value", "Result from Oracle query", registry=registry)
+g_script_run = Gauge("script_run_timestamp", "Unix timestamp of script execution", registry=registry)
+
+# ------------------- MAIN EXECUTION -------------------
+for share in NETWORK_SHARES:
+    try:
+        total, free, used, total_gb, free_gb, used_gb = get_disk_space(share)
+
+        g_total.labels(share).set(total_gb)
+        g_free.labels(share).set(free_gb)
+        g_used.labels(share).set(used_gb)
+
+        # ✅ large file detection
+        for filepath, size in find_large_files(share):
+            size_gb = size / (1024 ** 3)
+            g_large_file.labels(share, filepath).set(size_gb)
+
+    except Exception as e:
+        print(f"Error checking share {share}: {e}")
+
+# ✅ Oracle DB Query - safe close
+try:
+    val = query_oracle_value()
+    g_db_value.set(val)
+except Exception as e:
+    print(f"Oracle Query Error: {e}")
+
+g_script_run.set(time.time())
+
+push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+
+print("✅ Metrics pushed successfully!")
