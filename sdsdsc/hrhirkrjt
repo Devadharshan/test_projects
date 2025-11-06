@@ -1,0 +1,88 @@
+import psutil
+import cx_Oracle
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+import time
+
+# ------------------- CONFIG -------------------
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "windows_share_oracle_metrics"
+
+ORACLE_CLIENT_PATH = r"C:\oracle\instantclient_21_12"
+ORACLE_DSN = "host:port/service"
+ORACLE_USERNAME = "username"
+ORACLE_PASSWORD = "password"
+
+# Example query: must return 1 numeric value
+ORACLE_QUERY = "SELECT COUNT(*) FROM employees"
+
+# List all network shares to check
+NETWORK_SHARES = [
+    r"Z:\\",
+    r"Y:\\",
+    r"\\server\\share1",
+]
+
+# ------------------- FUNCTIONS -------------------
+def init_oracle():
+    try:
+        cx_Oracle.init_oracle_client(lib_dir=ORACLE_CLIENT_PATH)
+    except:
+        pass  # ignore if already initialized
+
+def get_share_space(path):
+    usage = psutil.disk_usage(path)
+    total_gb = usage.total / (1024 ** 3)
+    free_gb = usage.free / (1024 ** 3)
+    used_gb = usage.used / (1024 ** 3)
+    return usage.total, usage.free, usage.used, total_gb, free_gb, used_gb
+
+def query_oracle_value():
+    init_oracle()
+    with cx_Oracle.connect(ORACLE_USERNAME, ORACLE_PASSWORD, ORACLE_DSN) as conn:
+        cursor = conn.cursor()
+        cursor.execute(ORACLE_QUERY)
+        result = cursor.fetchone()[0]
+    return result
+
+# ------------------- MAIN LOGIC -------------------
+registry = CollectorRegistry()
+
+g_total = Gauge("network_share_total_bytes", "Total size of network share", ["share"], registry=registry)
+g_free = Gauge("network_share_free_bytes", "Free size of network share", ["share"], registry=registry)
+g_used = Gauge("network_share_used_bytes", "Used size of network share", ["share"], registry=registry)
+
+g_total_h = Gauge("network_share_total_gb", "Total size GB (human readable)", ["share"], registry=registry)
+g_free_h = Gauge("network_share_free_gb", "Free size GB (human readable)", ["share"], registry=registry)
+g_used_h = Gauge("network_share_used_gb", "Used size GB (human readable)", ["share"], registry=registry)
+
+g_db_value = Gauge("oracle_query_value", "Returned Oracle Query Value", registry=registry)
+g_script_run = Gauge("script_run_timestamp", "When script ran (epoch)", registry=registry)
+
+# Disk space metrics
+for share in NETWORK_SHARES:
+    try:
+        total, free, used, total_gb, free_gb, used_gb = get_share_space(share)
+        g_total.labels(share).set(total)
+        g_free.labels(share).set(free)
+        g_used.labels(share).set(used)
+
+        g_total_h.labels(share).set(total_gb)
+        g_free_h.labels(share).set(free_gb)
+        g_used_h.labels(share).set(used_gb)
+
+    except Exception as e:
+        print(f"Error accessing {share}: {e}")
+
+# Oracle DB metric
+try:
+    value = query_oracle_value()
+    g_db_value.set(value)
+except Exception as e:
+    print(f"Oracle Query Error: {e}")
+
+# Timestamp of push
+g_script_run.set(time.time())
+
+# Push everything
+push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+print("✅ Metrics pushed successfully!")
