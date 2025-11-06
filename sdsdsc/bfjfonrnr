@@ -1,0 +1,97 @@
+import oracledb
+import subprocess
+import datetime
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# -------------------------- CONFIG -----------------------------
+PUSHGATEWAY_URL = "http://your-pushgateway:9091"
+JOB_NAME = "windows_share_oracle_status"
+
+SHARES = [
+    r"\\server\share1",
+    r"\\server\share2"
+]
+
+ORACLE_DSN = "hostname:port/service_name"
+ORACLE_USER = "your_user"
+ORACLE_PASS = "your_password"
+
+# ---------------------------------------------------------------
+
+def get_share_space(share_path):
+    """
+    Uses Windows 'dir' to extract disk stats quickly.
+    """
+    try:
+        result = subprocess.check_output(f'dir "{share_path}"', shell=True, text=True, stderr=subprocess.DEVNULL)
+        lines = result.splitlines()
+        for line in reversed(lines):
+            if "bytes free" in line:
+                parts = line.split()
+                free_bytes = int(parts[0].replace(",", ""))
+                total_bytes = int(parts[2].replace(",", ""))
+                used_bytes = total_bytes - free_bytes
+                return total_bytes, used_bytes, free_bytes
+    except:
+        return None, None, None
+
+
+def query_restoration_date():
+    """
+    Fetch RESTORE_DATE from table (1 row expected).
+    """
+    conn = None
+    try:
+        conn = oracledb.connect(user=ORACLE_USER, password=ORACLE_PASS, dsn=ORACLE_DSN)
+        cur = conn.cursor()
+        cur.execute("SELECT RESTORE_DATE FROM RESTORATION_LOGS")
+        row = cur.fetchone()
+        if row:
+            restore_date = row[0]  # Leave as-is (DATE field)
+            return str(restore_date)
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+
+def main():
+    registry = CollectorRegistry()
+
+    # Gauges
+    total_gb_g = Gauge("share_total_gb", "Total Share Space (GB)", ["share"], registry=registry)
+    used_gb_g = Gauge("share_used_gb", "Used Share Space (GB)", ["share"], registry=registry)
+    free_gb_g = Gauge("share_free_gb", "Free Share Space (GB)", ["share"], registry=registry)
+    restore_date_g = Gauge("restore_date_info", "RESTORE Date (string stored as gauge label)", ["restore_date"], registry=registry)
+
+    # Push time as readable datetime string label
+    push_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    push_time_g = Gauge("script_push_time_info", "Script Push Time (string stored as label)", ["push_time"], registry=registry)
+
+    # Process share spaces
+    for share in SHARES:
+        total, used, free = get_share_space(share)
+        if total is None:
+            continue
+
+        total_gb = round(total / (1024 ** 3), 2)
+        used_gb = round(used / (1024 ** 3), 2)
+        free_gb = round(free / (1024 ** 3), 2)
+
+        total_gb_g.labels(share=share).set(total_gb)
+        used_gb_g.labels(share=share).set(used_gb)
+        free_gb_g.labels(share=share).set(free_gb)
+
+    # DB Value
+    restore_value = query_restoration_date()
+    if restore_value:
+        restore_date_g.labels(restore_date=restore_value).set(1)
+
+    push_time_g.labels(push_time=push_time).set(1)
+
+    # Push
+    push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+
+
+if __name__ == "__main__":
+    main()
