@@ -1,0 +1,67 @@
+import os
+import json
+import logging
+from datetime import datetime, timedelta
+import shutil
+import ctypes
+
+# ----- Load Config -----
+with open("config.json", "r") as f:
+    config = json.load(f)
+
+BASE_PATH = config["share_path"]
+RETENTION_DAYS = config["retention_days"]
+
+# ----- Logging -----
+log_filename = f"cleanup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+logging.basicConfig(
+    filename=log_filename,
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logging.info(f"Starting cleanup | Path: {BASE_PATH} | Retention: {RETENTION_DAYS} days")
+
+# ----- Disk Space Helper -----
+def get_space(path):
+    free = ctypes.c_ulonglong(0)
+    total = ctypes.c_ulonglong(0)
+    ctypes.windll.kernel32.GetDiskFreeSpaceExW(
+        ctypes.c_wchar_p(path), None, ctypes.byref(total), ctypes.byref(free)
+    )
+    return total.value, free.value
+
+# Capture disk state before cleanup
+total_before, free_before = get_space(BASE_PATH)
+
+cutoff_date = datetime.now() - timedelta(days=RETENTION_DAYS)
+
+# ----- Folder Cleanup -----
+for entry in os.scandir(BASE_PATH):
+    if entry.is_dir():
+        folder_name = entry.name.strip()
+
+        # Check if folder name is in YYYY-MM-DD format
+        try:
+            folder_date = datetime.strptime(folder_name, "%Y-%m-%d")
+        except ValueError:
+            logging.info(f"Skipping (not a date folder): {entry.path}")
+            continue
+
+        # Compare with retention period
+        if folder_date < cutoff_date:
+            shutil.rmtree(entry.path, ignore_errors=True)
+            logging.info(f"Deleted Folder: {entry.path} | Folder Date: {folder_date.date()}")
+        else:
+            logging.info(f"Keeping Folder: {entry.path} | Folder Date: {folder_date.date()} (within retention)")
+
+# Capture disk state after cleanup
+total_after, free_after = get_space(BASE_PATH)
+
+# Log space summary
+logging.info(f"Total Space Before: {total_before/1024/1024/1024:.2f} GB")
+logging.info(f"Free Space Before:  {free_before/1024/1024/1024:.2f} GB")
+logging.info(f"Free Space After:   {free_after/1024/1024/1024:.2f} GB")
+logging.info(f"Space Reclaimed:    {(free_after - free_before)/1024/1024:.2f} MB")
+logging.info("✅ Cleanup Completed Successfully")
+
+print(f"✅ Cleanup Completed. Log saved as: {log_filename}")
