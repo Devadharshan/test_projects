@@ -1,0 +1,44 @@
+import oracledb
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+import logging
+import json
+
+# Load config, setup registry, etc. as before
+
+registry = CollectorRegistry()
+PUSH_GATEWAY = "http://localhost:9091"
+JOB_NAME = "windows_monitoring_job"
+
+def push_restoration_logs():
+    oracledb.init_oracle_client()
+    conn = oracledb.connect(user="myuser", password="mypassword", dsn="hostname/orclpdb1")
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM restoration_logs")
+    row = cur.fetchone()  # Assuming 1 row
+
+    if row:
+        col_names = [desc[0] for desc in cur.description]
+        labels = {}
+        metrics = {}
+        for col_name, value in zip(col_names, row):
+            if isinstance(value, (int, float)):
+                # numeric → metric value
+                metrics[col_name] = value
+            elif isinstance(value, (str)):
+                # string → label
+                labels[col_name] = value
+            elif isinstance(value, (datetime.date, datetime.datetime)):
+                labels[col_name] = value.strftime("%Y-%m-%d")
+            else:
+                labels[col_name] = str(value)
+
+        # Push each numeric column as a metric
+        for col_name, val in metrics.items():
+            g = Gauge(f"restore_{col_name.lower()}", f"{col_name} from restoration_logs", labels.keys(), registry=registry)
+            g.labels(**labels).set(val)
+
+        # Push to Prometheus
+        push_to_gateway(PUSH_GATEWAY, job=JOB_NAME, registry=registry)
+        logging.info(f"Restoration logs pushed: {row}")
+
+    conn.close()
