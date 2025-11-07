@@ -1,0 +1,105 @@
+import os
+import time
+import requests
+import json
+import oracledb
+import shutil
+from datetime import datetime
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# ------------- Load Config -------------
+with open("config.json", "r") as f:
+    config = json.load(f)
+
+PUSHGATEWAY = config["pushgateway_url"]
+JOB_NAME = config["job_name"]
+shares = config["shares"]
+oracle_conf = config["oracle"]
+urls = config["urls"]
+
+# ------------- Registry -------------
+registry = CollectorRegistry()
+
+# Disk metrics
+g_total = Gauge("share_total_gb", "Total Space of Share", ["share"], registry=registry)
+g_free = Gauge("share_free_gb", "Free Space of Share", ["share"], registry=registry)
+g_used = Gauge("share_used_gb", "Used Space of Share", ["share"], registry=registry)
+
+# URL metrics
+g_url = Gauge("url_status", "URL Status (1=UP,0=DOWN)", ["url"], registry=registry)
+
+# DB Metrics
+g_restore = Gauge("restore_status", "DB Restore Status Value", ["restore_date"], registry=registry)
+
+# Push time
+g_push_time = Gauge("data_push_timestamp", "Time when data was pushed", ["human_time"], registry=registry)
+
+
+def get_disk_usage(share_path):
+    try:
+        total, used, free = shutil.disk_usage(share_path)
+        total_gb = round(total / (1024 ** 3), 2)
+        free_gb = round(free / (1024 ** 3), 2)
+        used_gb = round(used / (1024 ** 3), 2)
+        return total_gb, free_gb, used_gb
+    except:
+        return 0, 0, 0
+
+
+def check_urls():
+    for url in urls:
+        try:
+            r = requests.get(url, timeout=5)
+            g_url.labels(url=url).set(1 if r.status_code == 200 else 0)
+        except:
+            g_url.labels(url=url).set(0)
+
+
+def get_restore_date_from_db():
+    conn = None
+    try:
+        conn = oracledb.connect(
+            user=oracle_conf["username"],
+            password=oracle_conf["password"],
+            dsn=oracle_conf["dsn"]
+        )
+        cur = conn.cursor()
+        cur.execute("SELECT RESTORE_DATE FROM RESTORATION_LOGS FETCH FIRST 1 ROWS ONLY")
+        result = cur.fetchone()
+
+        if result:
+            restore_date = result[0]  # Oracle DATE → Python datetime
+            restore_str = restore_date.strftime("%Y-%m-%d %H:%M:%S")
+            g_restore.labels(restore_date=restore_str).set(1)
+
+    except Exception as e:
+        g_restore.labels(restore_date="DB_ERROR").set(0)
+    finally:
+        if conn:
+            conn.close()
+
+
+def main():
+    # Disk usage
+    for s in shares:
+        total, free, used = get_disk_usage(s["path"])
+        g_total.labels(share=s["name"]).set(total)
+        g_free.labels(share=s["name"]).set(free)
+        g_used.labels(share=s["name"]).set(used)
+
+    # URL checks
+    check_urls()
+
+    # DB restore
+    get_restore_date_from_db()
+
+    # Push timestamp
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    g_push_time.labels(human_time=now).set(1)
+
+    # Push to gateway
+    push_to_gateway(PUSHGATEWAY, job=JOB_NAME, registry=registry)
+
+
+if __name__ == "__main__":
+    main()
