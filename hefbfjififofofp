@@ -1,0 +1,105 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "focus_sod_check_dashboard",
+    "title": "Focus SOD Check Monitoring",
+    "tags": ["monitoring", "windows", "oracle", "urls"],
+    "timezone": "browser",
+    "schemaVersion": 41,
+    "version": 1,
+    "refresh": "30s",
+    "panels": [
+      {
+        "type": "stat",
+        "title": "Data Push Timestamp",
+        "gridPos": {"x":0,"y":0,"w":6,"h":4},
+        "id": 1,
+        "fieldConfig": {
+          "defaults": {
+            "unit": "dateTimeAsIso",
+            "decimals": 0
+          }
+        },
+        "targets": [
+          {
+            "expr": "data_push_timestamp{job=\"focus_sod_check\"}",
+            "legendFormat": "",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "type": "stat",
+        "title": "DB Restore Date",
+        "gridPos": {"x":6,"y":0,"w":6,"h":4},
+        "id": 2,
+        "fieldConfig": {
+          "defaults": {
+            "unit": "date",
+            "decimals": 0
+          }
+        },
+        "targets": [
+          {
+            "expr": "restore_status{job=\"focus_sod_check\"}",
+            "legendFormat": "",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "type": "stat",
+        "title": "Share Free GB",
+        "gridPos": {"x":0,"y":4,"w":4,"h":4},
+        "id": 3,
+        "fieldConfig": {"defaults": {"unit": "gigaBytes", "decimals": 2}},
+        "targets": [
+          {
+            "expr": "share_free_gb{job=\"focus_sod_check\"}",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "type": "stat",
+        "title": "Share Used GB",
+        "gridPos": {"x":4,"y":4,"w":4,"h":4},
+        "id": 4,
+        "fieldConfig": {"defaults": {"unit": "gigaBytes", "decimals": 2}},
+        "targets": [
+          {
+            "expr": "share_used_gb{job=\"focus_sod_check\"}",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "type": "stat",
+        "title": "Share Total GB",
+        "gridPos": {"x":8,"y":4,"w":4,"h":4},
+        "id": 5,
+        "fieldConfig": {"defaults": {"unit": "gigaBytes", "decimals": 2}},
+        "targets": [
+          {
+            "expr": "share_total_gb{job=\"focus_sod_check\"}",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "type": "stat",
+        "title": "URL Status",
+        "gridPos": {"x":0,"y":8,"w":12,"h":4},
+        "id": 6,
+        "fieldConfig": {"defaults": {"decimals": 0}},
+        "targets": [
+          {
+            "expr": "url_status{job=\"focus_sod_check\"}",
+            "refId": "A"
+          }
+        ]
+      }
+    ]
+  },
+  "overwrite": true
+}
