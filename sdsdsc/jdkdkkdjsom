@@ -1,0 +1,26 @@
+{
+  "pushgateway_url": "http://localhost:9091",
+  "job_name": "windows_monitoring_job",
+
+  "shares": [
+    {
+      "name": "Share1",
+      "path": "\\\\server\\share1"
+    },
+    {
+      "name": "Share2",
+      "path": "\\\\server\\share2"
+    }
+  ],
+
+  "oracle": {
+    "username": "myuser",
+    "password": "mypassword",
+    "dsn": "hostname/orclpdb1"
+  },
+
+  "urls": [
+    "https://example.com/health",
+    "https://anotherapp.com/status"
+  ]
+}
