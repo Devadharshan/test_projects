@@ -1,0 +1,105 @@
+import json
+import requests
+import logging
+import ctypes
+import oracledb
+from datetime import datetime
+from prometheus_client import Gauge, CollectorRegistry, push_to_gateway
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+
+# ---------------- Load Config ----------------
+with open("config.json", "r") as f:
+    config = json.load(f)
+
+shares = config["shares"]
+urls = config["urls"]
+db_user = config["db"]["user"]
+db_password = config["db"]["password"]
+db_dsn = config["db"]["dsn"]
+
+pushgateway_url = config["pushgateway"]["url"]
+job_name = config["pushgateway"]["job_name"]
+
+
+# ---------------- Helper: Get Share Disk Space ----------------
+def get_share_space(share_path):
+    free_bytes = ctypes.c_ulonglong()
+    total_bytes = ctypes.c_ulonglong()
+    ctypes.windll.kernel32.GetDiskFreeSpaceExW(share_path, None, ctypes.byref(total_bytes), ctypes.byref(free_bytes))
+
+    total_gb = round(total_bytes.value / (1024**3), 2)
+    free_gb = round(free_bytes.value / (1024**3), 2)
+    used_gb = round(total_gb - free_gb, 2)
+    return total_gb, used_gb, free_gb
+
+
+# ---------------- Prepare Metrics Registry ----------------
+registry = CollectorRegistry()
+
+share_total_metric = Gauge("share_total_gb", "Total Share Size (GB)", ["share"], registry=registry)
+share_used_metric = Gauge("share_used_gb", "Used Share Size (GB)", ["share"], registry=registry)
+share_free_metric = Gauge("share_free_gb", "Free Share Size (GB)", ["share"], registry=registry)
+
+url_status_metric = Gauge("url_status", "URL Status (1=UP, 0=DOWN)", ["url"], registry=registry)
+
+restore_status_metric = Gauge("restore_status", "Restore date in YYYYMMDD format", registry=registry)
+
+push_time_metric = Gauge("data_push_timestamp", "Time when the metric was pushed (YYYYMMDDHHMMSS)", registry=registry)
+
+
+# ---------------- Collect Share Metrics ----------------
+for share in shares:
+    name = share["name"]
+    path = share["path"]
+    try:
+        total_gb, used_gb, free_gb = get_share_space(path)
+        share_total_metric.labels(name).set(total_gb)
+        share_used_metric.labels(name).set(used_gb)
+        share_free_metric.labels(name).set(free_gb)
+    except Exception as e:
+        logging.error(f"Share access error ({name}): {e}")
+
+
+# ---------------- Check URLs ----------------
+for url in urls:
+    try:
+        r = requests.get(url, timeout=4)
+        url_status_metric.labels(url).set(1 if r.status_code == 200 else 0)
+    except Exception:
+        url_status_metric.labels(url).set(0)
+
+
+# ---------------- Database Query (Restore Date) ----------------
+try:
+    oracledb.init_oracle_client()
+    conn = oracledb.connect(user=db_user, password=db_password, dsn=db_dsn)
+    cursor = conn.cursor()
+    cursor.execute("SELECT RESTORE_DATE FROM RESTORATION_LOGS")
+    row = cursor.fetchone()
+
+    if row and row[0]:
+        restore_date = row[0]
+        restore_status_metric.set(int(restore_date.strftime("%Y%m%d")))
+    else:
+        restore_status_metric.set(0)
+
+except Exception as e:
+    logging.error(f"DB Error: {e}")
+    restore_status_metric.set(0)
+
+finally:
+    try:
+        cursor.close()
+        conn.close()
+    except:
+        pass
+
+
+# ---------------- Push Timestamp ----------------
+push_time_metric.set(int(datetime.now().strftime("%Y%m%d%H%M%S")))
+
+
+# ---------------- Push to Prometheus Pushgateway ----------------
+push_to_gateway(pushgateway_url, job=job_name, registry=registry)
+logging.info(f"Metrics pushed successfully to {pushgateway_url} as job '{job_name}'")
