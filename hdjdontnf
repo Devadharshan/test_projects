@@ -1,0 +1,123 @@
+import os
+import json
+import shutil
+import requests
+import logging
+from datetime import datetime
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+import oracledb
+
+# Logging setup
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# Load JSON config
+with open("config.json", "r") as f:
+    config = json.load(f)
+
+PUSHGATEWAY = config["pushgateway_url"]
+JOB_NAME = config["job_name"]
+
+shares = config["shares"]
+urls = config["urls"]
+oracle_conf = config["oracle"]
+
+# Registry
+registry = CollectorRegistry()
+
+# Disk Metrics
+g_total = Gauge("share_total_gb", "Total Share Capacity (GB)", ["share"], registry=registry)
+g_free = Gauge("share_free_gb", "Free Share Space (GB)", ["share"], registry=registry)
+g_used = Gauge("share_used_gb", "Used Share Space (GB)", ["share"], registry=registry)
+
+# URL Status
+g_url = Gauge("url_status", "1 = UP, 0 = DOWN", ["url"], registry=registry)
+
+# DB Restore Status
+g_restore = Gauge("restore_status", "DB Restore Status", ["restore_date"], registry=registry)
+
+# Push timestamp
+g_push_time = Gauge("data_push_timestamp", "When data was pushed (Human Time Stored as Label)", ["human_time"], registry=registry)
+
+
+def get_disk_usage(path):
+    try:
+        total, used, free = shutil.disk_usage(path)
+        total_gb = round(total / (1024 ** 3), 2)
+        free_gb = round(free / (1024 ** 3), 2)
+        used_gb = round(used / (1024 ** 3), 2)
+        return total_gb, free_gb, used_gb
+    except Exception as e:
+        logging.error(f"Error reading share {path}: {e}")
+        return 0, 0, 0
+
+
+def check_urls():
+    for url in urls:
+        try:
+            logging.info(f"Checking URL: {url}")
+            r = requests.get(url, timeout=5)
+            if r.status_code == 200:
+                g_url.labels(url=url).set(1)
+                logging.info(f"URL UP: {url}")
+            else:
+                g_url.labels(url=url).set(0)
+                logging.warning(f"URL DOWN (status {r.status_code}): {url}")
+        except Exception as e:
+            g_url.labels(url=url).set(0)
+            logging.error(f"URL ERROR {url}: {e}")
+
+
+def get_restore_date_from_db():
+    conn = None
+    try:
+        conn = oracledb.connect(
+            user=oracle_conf["username"],
+            password=oracle_conf["password"],
+            dsn=oracle_conf["dsn"]
+        )
+        cur = conn.cursor()
+        cur.execute("SELECT RESTORE_DATE FROM RESTORATION_LOGS FETCH FIRST 1 ROWS ONLY")
+        result = cur.fetchone()
+
+        if result:
+            restore_date = result[0]
+            restore_str = restore_date.strftime("%Y-%m-%d %H:%M:%S")
+            g_restore.labels(restore_date=restore_str).set(1)
+            logging.info(f"DB RESTORE DATE: {restore_str}")
+        else:
+            g_restore.labels(restore_date="NO_DATA").set(0)
+
+    except Exception as e:
+        logging.error(f"DB ERROR: {e}")
+        g_restore.labels(restore_date="DB_ERROR").set(0)
+
+    finally:
+        if conn:
+            conn.close()
+
+
+def main():
+    # Disk Checks
+    for s in shares:
+        total, free, used = get_disk_usage(s["path"])
+        g_total.labels(share=s["name"]).set(total)
+        g_free.labels(share=s["name"]).set(free)
+        g_used.labels(share=s["name"]).set(used)
+
+    # URL Checks
+    check_urls()
+
+    # DB Restore Check
+    get_restore_date_from_db()
+
+    # Push Time (Human Readable stored as Label)
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    g_push_time.labels(human_time=now_str).set(1)
+
+    # Push to Prometheus Gateway
+    push_to_gateway(PUSHGATEWAY, job=JOB_NAME, registry=registry)
+    logging.info(f"✅ Metrics pushed successfully at {now_str}")
+
+
+if __name__ == "__main__":
+    main()
