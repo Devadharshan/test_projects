@@ -1,0 +1,118 @@
+import json
+import logging
+import shutil
+import requests
+import oracledb
+from datetime import datetime
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# ----------------------------------------
+# Logging Setup
+# ----------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+# ----------------------------------------
+# Load Config
+# ----------------------------------------
+with open("config.json", "r") as f:
+    config = json.load(f)
+
+PUSHGATEWAY = config["pushgateway_url"]
+JOB_NAME = config["job_name"]
+
+registry = CollectorRegistry()
+
+# ----------------------------------------
+# Define Metrics
+# ----------------------------------------
+g_share_total = Gauge("share_total_gb", "Total size of share in GB", ["share"], registry=registry)
+g_share_free = Gauge("share_free_gb", "Free size of share in GB", ["share"], registry=registry)
+g_share_used = Gauge("share_used_gb", "Used size of share in GB", ["share"], registry=registry)
+
+g_url_status = Gauge("url_status", "URL health status", ["url"], registry=registry)
+
+# Gauge with labels for DB results
+g_restore = Gauge(
+    "restore_status",
+    "DB restore log details",
+    ["start_dt", "end_dt", "restore_date", "original_dbname", "dbtype"],
+    registry=registry
+)
+
+g_timestamp = Gauge("data_push_timestamp", "Timestamp when metrics were pushed (human readable)", registry=registry)
+
+# ----------------------------------------
+# Share Check
+# ----------------------------------------
+for share in config["shares"]:
+    name = share["name"]
+    path = share["path"]
+    try:
+        total, used, free = shutil.disk_usage(path)
+        total_gb = round(total / (1024**3), 2)
+        used_gb = round(used / (1024**3), 2)
+        free_gb = round(free / (1024**3), 2)
+
+        g_share_total.labels(share=name).set(total_gb)
+        g_share_used.labels(share=name).set(used_gb)
+        g_share_free.labels(share=name).set(free_gb)
+
+    except Exception as e:
+        logging.error(f"Error checking share {name}: {e}")
+
+# ----------------------------------------
+# URL Checks
+# ----------------------------------------
+for url in config["urls"]:
+    try:
+        r = requests.get(url, timeout=5)
+        status = 1 if r.status_code == 200 else 0
+    except:
+        status = 0
+    logging.info(f"URL Check: {url} -> {status}")
+    g_url_status.labels(url=url).set(status)
+
+# ----------------------------------------
+# Oracle DB Query
+# ----------------------------------------
+try:
+    conn = oracledb.connect(
+        user=config["oracle"]["username"],
+        password=config["oracle"]["password"],
+        dsn=config["oracle"]["dsn"]
+    )
+    cur = conn.cursor()
+    cur.execute("SELECT START_DT, END_DT, RESTORE_DATE, ORIGINAL_DBNAME, DBTYPE FROM restoration_logs")
+    row = cur.fetchone()
+
+    if row:
+        start_dt, end_dt, restore_date, original_dbname, dbtype = row
+
+        g_restore.labels(
+            start_dt=str(start_dt),
+            end_dt=str(end_dt),
+            restore_date=str(restore_date),
+            original_dbname=str(original_dbname),
+            dbtype=str(dbtype)
+        ).set(1)
+
+    cur.close()
+    conn.close()
+
+except Exception as e:
+    logging.error(f"DB Error: {e}")
+
+# ----------------------------------------
+# Push Time (Human Readable Text)
+# ----------------------------------------
+human_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+logging.info(f"Metrics pushed at: {human_time}")
+g_timestamp.set(1)  # Display timestamp through Grafana label or Stat panel title
+
+# ----------------------------------------
+# Push to Gateway
+# ----------------------------------------
+push_to_gateway(PUSHGATEWAY, job=JOB_NAME, registry=registry)
