@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""
+push_bp_trend_raw.py (updated)
+
+- Trend-only (no aggregations) raw row exporter.
+- Forces IST timezone for 'today', 'yesterday', 'last_7_days', 'last_30_days'.
+- Computes time_taken from Start/End columns (dayfirst parsing).
+- Sends metrics to Pushgateway at http://localhost:9091
+- Jobs:
+    - bp_summary_raw
+    - bp_non_summary_raw
+    - bp_non_summary_raw_all (raw table gauge with all columns)
+- Checks that the CSV file exists for the selected window before sending metrics.
+Requires: pip install pandas prometheus_client
+"""
+import os
+import re
+import pandas as pd
+from datetime import datetime, timedelta, timezone
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# Python 3.9+: zoneinfo
+try:
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+except Exception:
+    IST = timezone(timedelta(hours=5, 30))
+
+# ---------------- CONFIG ----------------
+DATA_FOLDER = r"C:\bpmetrics\data"   # <-- change to your folder
+PUSHGATEWAY = "http://localhost:9091"
+
+JOB_SUMMARY_RAW = "bp_summary_raw"
+JOB_NON_SUMMARY_RAW = "bp_non_summary_raw"
+JOB_NON_SUMMARY_RAW_ALL = "bp_non_summary_raw_all"
+
+START_COL = "Start Time"
+END_COL = "End Time"
+TRADES_COL = "No_of_trades"
+
+# ---------------- HELPERS ----------------
+def read_csv_safely(path):
+    try:
+        return pd.read_csv(path, dtype=str)
+    except UnicodeDecodeError:
+        return pd.read_csv(path, encoding="latin-1", dtype=str)
+    except Exception as e:
+        print(f"[read_csv_safely] Error reading {path}: {e}")
+        return pd.DataFrame()
+
+def extract_date_from_filename(fname):
+    m = re.findall(r"(\d{4}-\d{2}-\d{2})", fname)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m[-1], "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+def clean_label_key(k: str) -> str:
+    if k is None:
+        return "unknown"
+    s = str(k).strip().lower()
+    s = re.sub(r'[^a-z0-9_]', '_', s)
+    if not re.match(r'^[a-z]', s):
+        s = 'k_' + s
+    return s
+
+def clean_label_value(v: str) -> str:
+    if v is None:
+        return "unknown"
+    s = str(v).strip()
+    if s == "":
+        return "unknown"
+    return re.sub(r'[^A-Za-z0-9_:./@-]', '_', s)
+
+def is_number_like(s):
+    if s is None:
+        return False
+    s = str(s).strip()
+    if s == "":
+        return False
+    try:
+        float(s.replace(",", ""))
+        return True
+    except:
+        return False
+
+def to_float(s):
+    if s is None:
+        return None
+    s = str(s).strip()
+    if s == "" or s.lower() == "nan":
+        return None
+    try:
+        return float(s.replace(",", ""))
+    except:
+        return None
+
+def windows_for_date(d, today_date):
+    windows = []
+    if d is None:
+        return windows
+    yesterday = today_date - timedelta(days=1)
+    if d == today_date:
+        windows.append("today")
+    if d == yesterday:
+        windows.append("yesterday")
+    if (today_date - timedelta(days=6)) <= d <= today_date:
+        windows.append("last_7_days")
+    if (today_date - timedelta(days=29)) <= d <= today_date:
+        windows.append("last_30_days")
+    return windows
+
+# ---------------- MAIN ----------------
+def main():
+    now_ist = datetime.now(IST)
+    today_date = now_ist.date()
+
+    files = sorted([f for f in os.listdir(DATA_FOLDER) if f.lower().endswith(".csv")])
+    if not files:
+        print(f"No CSV files found in {DATA_FOLDER}")
+        return
+
+    summary_rows = []
+    non_summary_rows = []
+
+    for fname in files:
+        full = os.path.join(DATA_FOLDER, fname)
+        df = read_csv_safely(full)
+        if df is None or df.empty:
+            continue
+        df.columns = [c.strip() for c in df.columns]
+        file_date = extract_date_from_filename(fname)
+        df["file_name"] = fname
+        df["file_date"] = file_date
+
+        if "_summary" in fname.lower():
+            summary_rows.append(df)
+        else:
+            non_summary_rows.append(df)
+
+    summary_df = pd.concat(summary_rows, ignore_index=True) if summary_rows else pd.DataFrame()
+    non_summary_df = pd.concat(non_summary_rows, ignore_index=True) if non_summary_rows else pd.DataFrame()
+
+    # ---------------- Non-summary: compute time_taken & durationpertrade ----------------
+    if not non_summary_df.empty:
+        if START_COL in non_summary_df.columns and END_COL in non_summary_df.columns:
+            s = pd.to_datetime(non_summary_df[START_COL], dayfirst=True, errors="coerce")
+            e = pd.to_datetime(non_summary_df[END_COL], dayfirst=True, errors="coerce")
+            non_summary_df["time_taken"] = (e - s).dt.total_seconds()
+            non_summary_df["time_taken"] = non_summary_df["time_taken"].where(non_summary_df["time_taken"].notna(), None)
+            non_summary_df["duration"] = non_summary_df["time_taken"]
+
+        if TRADES_COL in non_summary_df.columns:
+            non_summary_df["_trades_num"] = non_summary_df[TRADES_COL].apply(to_float)
+        else:
+            non_summary_df["_trades_num"] = None
+
+        def compute_dpt(row):
+            dur = to_float(row.get("duration"))
+            tr = row.get("_trades_num")
+            if dur is None or tr is None or tr == 0:
+                return None
+            return dur / tr
+
+        non_summary_df["durationpertrade"] = non_summary_df.apply(compute_dpt, axis=1)
+        if "_trades_num" in non_summary_df.columns:
+            non_summary_df.drop(columns=["_trades_num"], inplace=True)
+
+    # ---------------- Push registries ----------------
+    summary_registry = CollectorRegistry()
+    non_summary_registry = CollectorRegistry()
+    raw_registry = CollectorRegistry()  # new raw table gauge
+
+    # ---------------- Helper: prepare gauges ----------------
+    def prepare_gauges(df, prefix, registry):
+        gauges = {}
+        if df.empty:
+            return gauges
+        numeric_cols = []
+        for col in df.columns:
+            if col in ("file_name", "file_date"):
+                continue
+            try:
+                first_val = df[col].dropna()
+                if not first_val.empty and is_number_like(first_val.iloc[0]):
+                    numeric_cols.append(col)
+            except:
+                continue
+
+        # non-numeric labels
+        label_cols = [c for c in df.columns if c not in numeric_cols and c not in ("file_name","file_date")]
+        label_keys = [clean_label_key(c) for c in label_cols] + ["file_name","file_date","window"]
+
+        for col in numeric_cols:
+            metric_name = prefix + "_" + re.sub(r'[^a-z0-9_]', '_', col.strip().lower())
+            if "duration" in col.lower() and not metric_name.endswith("_seconds"):
+                metric_name += "_seconds"
+            gauge = Gauge(metric_name, f"{metric_name} (from csv {col})", labelnames=label_keys, registry=registry)
+            gauges[col] = (gauge, metric_name, label_keys)
+        return gauges, label_cols
+
+    summary_gauges, summary_label_cols = prepare_gauges(summary_df, "new_data_summary_row", summary_registry)
+    non_summary_gauges, non_summary_label_cols = prepare_gauges(non_summary_df, "new_data_non_summary_row", non_summary_registry)
+    raw_gauges, raw_label_cols = prepare_gauges(non_summary_df, "new_data_non_summary_row_raw", raw_registry)
+
+    # ---------------- Push function ----------------
+    def push_rows(df, gauges_map):
+        if df.empty or not gauges_map:
+            return
+        numeric_cols = set(gauges_map.keys())
+        for _, row in df.iterrows():
+            file_date_obj = row.get("file_date")
+            windows = windows_for_date(file_date_obj, today_date)
+            if not windows:
+                continue
+            for w in windows:
+                label_items = {}
+                for col in df.columns:
+                    if col in numeric_cols:
+                        continue
+                    label_items[clean_label_key(col)] = clean_label_value(row.get(col))
+                label_items["file_name"] = clean_label_value(row.get("file_name"))
+                fd_str = row.get("file_date")
+                label_items["file_date"] = str(fd_str) if fd_str else ""
+                label_items["window"] = w
+
+                for col, (gauge_obj, _, label_keys) in gauges_map.items():
+                    val = to_float(row.get(col))
+                    val = val if val is not None else 0.0
+                    label_values = [label_items.get(lk,"unknown") for lk in label_keys]
+                    gauge_obj.labels(*label_values).set(val)
+
+    # ---------------- Push to Pushgateway ----------------
+    if not summary_df.empty and summary_gauges:
+        push_rows(summary_df, summary_gauges)
+        push_to_gateway(PUSHGATEWAY, job=JOB_SUMMARY_RAW, registry=summary_registry)
+        print(f"Pushed summary raw -> job: {JOB_SUMMARY_RAW}")
+
+    if not non_summary_df.empty and non_summary_gauges:
+        push_rows(non_summary_df, non_summary_gauges)
+        push_to_gateway(PUSHGATEWAY, job=JOB_NON_SUMMARY_RAW, registry=non_summary_registry)
+        print(f"Pushed non-summary raw -> job: {JOB_NON_SUMMARY_RAW}")
+
+    if not non_summary_df.empty and raw_gauges:
+        push_rows(non_summary_df, raw_gauges)
+        push_to_gateway(PUSHGATEWAY, job=JOB_NON_SUMMARY_RAW_ALL, registry=raw_registry)
+        print(f"Pushed raw non-summary -> job: {JOB_NON_SUMMARY_RAW_ALL}")
+
+    print("Done. Check Pushgateway:", PUSHGATEWAY)
+
+if __name__ == "__main__":
+    main()
