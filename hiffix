@@ -1,0 +1,63 @@
+# ---------------- push raw table ----------------
+def push_raw_table(df, registry, job_name, prefix):
+    """
+    Push all CSV columns as-is into a single Gauge per row.
+    Includes start_time, end_time, etc. as string labels.
+    """
+    if df.empty:
+        return
+
+    # Determine label keys: all columns + file_name, file_date, window
+    label_cols = [c for c in df.columns if c != "file_date"]
+    label_keys = [clean_label_key(c) for c in label_cols] + ["file_date", "window"]
+
+    # map cleaned label keys back to original column names
+    label_key_map = {clean_label_key(c): c for c in df.columns}
+
+    # create a dummy gauge with one numeric value (Prometheus requires numeric)
+    gauge = Gauge(f"{prefix}_row", f"{prefix} row (all columns as labels)", labelnames=label_keys, registry=registry)
+
+    today_date = datetime.now(IST).date()
+
+    for idx, row in df.iterrows():
+        windows = windows_for_date(row.get("file_date"), today_date)
+        if not windows:
+            continue
+
+        for w in windows:
+            label_values = []
+            for lk in label_keys:
+                if lk == "window":
+                    label_values.append(w)
+                elif lk == "file_date":
+                    fd = row.get("file_date")
+                    if isinstance(fd, datetime):
+                        label_values.append(fd.date().isoformat())
+                    else:
+                        label_values.append(str(fd) if fd is not None else "")
+                else:
+                    orig_col = label_key_map.get(lk)
+                    val = row.get(orig_col, "")
+                    label_values.append(str(val) if val is not None else "")
+            # set a dummy value 1.0 for the gauge (Prometheus needs numeric)
+            try:
+                gauge.labels(*label_values).set(1.0)
+            except Exception as e:
+                print(f"[push_raw_table] failed to set row labels={label_values}: {e}")
+
+# ---------------- Example usage in main ----------------
+if not summary_df.empty:
+    push_raw_table(summary_df, summary_registry, JOB_SUMMARY_RAW+"_raw", "summary_raw")
+    try:
+        push_to_gateway(PUSHGATEWAY, job=JOB_SUMMARY_RAW+"_raw", registry=summary_registry)
+        print(f"Pushed summary raw table -> job: {JOB_SUMMARY_RAW}_raw")
+    except Exception as e:
+        print(f"[ERROR] push summary raw table to gateway: {e}")
+
+if not non_summary_df.empty:
+    push_raw_table(non_summary_df, non_summary_registry, JOB_NON_SUMMARY_RAW+"_raw", "non_summary_raw")
+    try:
+        push_to_gateway(PUSHGATEWAY, job=JOB_NON_SUMMARY_RAW+"_raw", registry=non_summary_registry)
+        print(f"Pushed non-summary raw table -> job: {JOB_NON_SUMMARY_RAW}_raw")
+    except Exception as e:
+        print(f"[ERROR] push non-summary raw table to gateway: {e}")
