@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+import os
+import pandas as pd
+import traceback
+from datetime import datetime, timedelta, timezone
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# --- CONFIG ---
+DATA_FOLDER = r"C:\bpmetrics\data"       # CHANGE YOUR PATH
+PUSHGATEWAY = "http://localhost:9091"
+
+JOB_SUMMARY = "bp_raw_summary"
+JOB_NON_SUMMARY = "bp_raw_nonsummary"
+
+try:
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+except:
+    IST = timezone(timedelta(hours=5, minutes=30))
+
+def read_csv_safely(path):
+    try:
+        return pd.read_csv(path, dtype=str)
+    except:
+        return pd.read_csv(path, encoding="latin-1", dtype=str)
+
+def normalize_columns(df):
+    df.columns = (df.columns.str.strip()
+                  .str.lower()
+                  .str.replace(" ", "")
+                  .str.replace(".", ""))
+    rename_map = {
+        "bpname": "BP NAME",
+        "threadid": "Thread ID",
+        "jobid": "JOB ID",
+        "starttime": "Start Time",
+        "endtime": "End Time",
+        "duration": "Duration",
+        "nooftrades": "No of trades",
+        "durationpertrade": "DurationPerTrade",
+        "jobdetails": "JobDetails"
+    }
+    df = df.rename(columns=rename_map)
+    return df
+
+def to_float(x):
+    try:
+        return float(str(x).replace(",", "").strip())
+    except:
+        return None
+
+def push_dataframe(df, job_name):
+    if df.empty:
+        print(f"[{job_name}] No data to push")
+        return
+    
+    registry = CollectorRegistry()
+    g = Gauge("bp_raw_table_row", "Raw BP Table Row", ["column", "bpname", "thread", "jobid", "jobdetails"], registry=registry)
+
+    for _, row in df.iterrows():
+        bp = row.get("BP NAME", "unknown")
+        th = row.get("Thread ID", "unknown")
+        jid = row.get("JOB ID", "unknown")
+        det = row.get("JobDetails", "unknown")
+
+        for col in df.columns:
+            val = row.get(col)
+            numeric = to_float(val)
+            if numeric is None:
+                continue
+    
+            g.labels(column=col, bpname=bp, thread=th, jobid=jid, jobdetails=det).set(numeric)
+
+    push_to_gateway(PUSHGATEWAY, job=job_name, registry=registry)
+    print(f"✅ Pushed → {job_name}")
+
+def main():
+    files = sorted([f for f in os.listdir(DATA_FOLDER) if f.lower().endswith(".csv")])
+
+    summary_frames = []
+    non_summary_frames = []
+
+    for f in files:
+        full = os.path.join(DATA_FOLDER, f)
+        df = read_csv_safely(full)
+        if df.empty:
+            continue
+
+        df = normalize_columns(df)
+
+        if not all(x in df.columns for x in ["BP NAME","Thread ID","JOB ID","Start Time","End Time","Duration","No of trades","DurationPerTrade","JobDetails"]):
+            print(f"Skipping {f} — missing required columns")
+            continue
+
+        if "_summary" in f.lower():
+            summary_frames.append(df)
+        else:
+            non_summary_frames.append(df)
+
+    summary_df = pd.concat(summary_frames, ignore_index=True) if summary_frames else pd.DataFrame()
+    non_summary_df = pd.concat(non_summary_frames, ignore_index=True) if non_summary_frames else pd.DataFrame()
+
+    push_dataframe(summary_df, JOB_SUMMARY)
+    push_dataframe(non_summary_df, JOB_NON_SUMMARY)
+
+if __name__ == "__main__":
+    main()
