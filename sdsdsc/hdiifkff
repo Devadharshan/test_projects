@@ -1,0 +1,59 @@
+import os
+import pandas as pd
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# ---------------- CONFIG ----------------
+CSV_FILE = "<PATH_TO_CSV>"  # Example: r"D:\bpdata\non_summary_11_11_2025.csv"
+PUSHGATEWAY = "<PUSHGATEWAY_URL>"  # Example: "http://localhost:9091"
+JOB_NAME = "bp_raw_job_runs"
+# ----------------------------------------
+
+
+def sanitize_label(value):
+    if pd.isna(value):
+        return ""
+    return str(value).replace(" ", "_").replace(",", "_")
+
+
+def push_data():
+    if not os.path.exists(CSV_FILE):
+        print("CSV not found. No push done.")
+        return
+
+    df = pd.read_csv(CSV_FILE)
+
+    required_columns = [
+        "BP Name","Thread ID","JOB ID","Start Time","End Time",
+        "Duration","No of trades","DurationPerTrade","JobDetails"
+    ]
+    df = df[required_columns]
+
+    registry = CollectorRegistry()
+    metric = Gauge(
+        "bp_job_run_info",
+        "Business process job run info",
+        [
+            "bp_name","thread_id","job_id","start_time","end_time",
+            "no_of_trades","duration_per_trade","job_details"
+        ],
+        registry=registry
+    )
+
+    for _, row in df.iterrows():
+        metric.labels(
+            bp_name=sanitize_label(row["BP Name"]),
+            thread_id=sanitize_label(row["Thread ID"]),
+            job_id=sanitize_label(row["JOB ID"]),
+            start_time=sanitize_label(row["Start Time"]),
+            end_time=sanitize_label(row["End Time"]),
+            no_of_trades=sanitize_label(row["No of trades"]),
+            duration_per_trade=sanitize_label(row["DurationPerTrade"]),
+            job_details=sanitize_label(row["JobDetails"])
+        ).set(float(row["Duration"]))
+
+    push_to_gateway(PUSHGATEWAY, job=JOB_NAME, registry=registry)
+    print("✅ Successfully pushed raw job run metrics.")
+
+
+if __name__ == "__main__":
+    push_data()
