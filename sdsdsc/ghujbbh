@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""
+push_bp_raw_table_full.py
+
+- Sends entire CSV rows (all columns) to Prometheus Pushgateway as a table-like metric.
+- One gauge per job: summary and non-summary separate.
+- All CSV columns become labels, numeric columns also used as metric values.
+- Supports IST timezone windows for today, yesterday, last_7_days, last_30_days.
+- Sends metrics to http://localhost:9091
+
+Requires: pip install pandas prometheus_client
+"""
+import os
+import pandas as pd
+import re
+from datetime import datetime, timedelta, timezone
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# ----- IST timezone -----
+try:
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+except Exception:
+    IST = timezone(timedelta(hours=5, minutes=30))
+
+# ----- CONFIG -----
+DATA_FOLDER = r"C:\bpmetrics\data"   # <-- change
+PUSHGATEWAY = "http://localhost:9091"
+
+JOB_SUMMARY = "bp_raw_table_summary"
+JOB_NON_SUMMARY = "bp_raw_table_non_summary"
+
+# ----- HELPERS -----
+def read_csv_safely(path):
+    try:
+        return pd.read_csv(path, dtype=str)
+    except:
+        try:
+            return pd.read_csv(path, encoding="latin-1", dtype=str)
+        except Exception as e:
+            print(f"[read_csv_safely] Error reading {path}: {e}")
+            return pd.DataFrame()
+
+def extract_date_from_filename(fname):
+    m = re.findall(r"(\d{4}-\d{2}-\d{2})", fname)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m[-1], "%Y-%m-%d").date()
+    except:
+        return None
+
+def clean_label_key(k: str) -> str:
+    if k is None:
+        return "unknown"
+    s = str(k).strip().lower()
+    s = re.sub(r'[^a-z0-9_]', '_', s)
+    if not re.match(r'^[a-z]', s):
+        s = 'k_' + s
+    return s
+
+def clean_label_value(v: str) -> str:
+    if v is None:
+        return "unknown"
+    s = str(v).strip()
+    if s == "":
+        return "unknown"
+    return re.sub(r'[^A-Za-z0-9_:./@-]', '_', s)
+
+def windows_for_date(d, today_date):
+    windows = []
+    if d is None:
+        return windows
+    yesterday = today_date - timedelta(days=1)
+    if d == today_date:
+        windows.append("today")
+    if d == yesterday:
+        windows.append("yesterday")
+    if (today_date - timedelta(days=6)) <= d <= today_date:
+        windows.append("last_7_days")
+    if (today_date - timedelta(days=29)) <= d <= today_date:
+        windows.append("last_30_days")
+    return windows
+
+# ----- MAIN -----
+def main():
+    today_date = datetime.now(IST).date()
+
+    try:
+        files = sorted([f for f in os.listdir(DATA_FOLDER) if f.lower().endswith(".csv")])
+    except Exception as e:
+        print(f"[main] Could not list DATA_FOLDER {DATA_FOLDER}: {e}")
+        return
+
+    if not files:
+        print(f"[main] No CSV files found in {DATA_FOLDER}")
+        return
+
+    summary_rows = []
+    non_summary_rows = []
+
+    for fname in files:
+        full = os.path.join(DATA_FOLDER, fname)
+        df = read_csv_safely(full)
+        if df is None or df.empty:
+            continue
+        df.columns = [c.strip() for c in df.columns]
+        file_date = extract_date_from_filename(fname)
+        df["file_name"] = fname
+        df["file_date"] = file_date
+        if "_summary" in fname.lower():
+            summary_rows.append(df)
+        else:
+            non_summary_rows.append(df)
+
+    summary_df = pd.concat(summary_rows, ignore_index=True) if summary_rows else pd.DataFrame()
+    non_summary_df = pd.concat(non_summary_rows, ignore_index=True) if non_summary_rows else pd.DataFrame()
+
+    # ----- push function for full CSV table -----
+    def push_raw_table(df, job_name):
+        if df.empty:
+            print(f"[push_raw_table] No data for job {job_name}")
+            return
+
+        registry = CollectorRegistry()
+
+        # One gauge; value is dummy (1.0) just to visualize table, all data in labels
+        gauge = Gauge("bp_raw_table_row",
+                      "Raw CSV row table",
+                      labelnames=["file_name", "file_date", "window"] +
+                                 [clean_label_key(c) for c in df.columns],
+                      registry=registry)
+
+        for _, row in df.iterrows():
+            file_date_obj = row.get("file_date")
+            windows = windows_for_date(file_date_obj, today_date)
+            if not windows:
+                continue
+            for w in windows:
+                label_values = [clean_label_value(row.get("file_name", "unknown")),
+                                str(row.get("file_date") or ""),
+                                w]
+                for c in df.columns:
+                    label_values.append(clean_label_value(row.get(c)))
+                try:
+                    gauge.labels(*label_values).set(1.0)
+                except Exception as e:
+                    print(f"[push_raw_table] failed to set row: {e}")
+
+        try:
+            push_to_gateway(PUSHGATEWAY, job=job_name, registry=registry)
+            print(f"Pushed raw table -> job: {job_name}")
+        except Exception as e:
+            print(f"[push_raw_table] push_to_gateway failed for {job_name}: {e}")
+
+    push_raw_table(summary_df, JOB_SUMMARY)
+    push_raw_table(non_summary_df, JOB_NON_SUMMARY)
+
+    print("Done. Check Pushgateway:", PUSHGATEWAY)
+
+
+if __name__ == "__main__":
+    main()
