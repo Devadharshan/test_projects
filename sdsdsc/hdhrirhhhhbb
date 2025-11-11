@@ -1,0 +1,119 @@
+import os
+import pandas as pd
+from datetime import datetime, timedelta
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+import re
+
+# ---- CONFIG ----
+DATA_FOLDER = r"C:\bp_data"
+PUSHGATEWAY = "http://localhost:9091"
+
+TIMEZONE_OFFSET = timedelta(hours=5, minutes=30)  # IST
+
+DATE_FORMAT = "%d/%m/%Y %H:%M"  # Format in CSV
+
+# Filename pattern example: BP_ProdLon_x64_2025-10-24_summary.csv
+FILENAME_DATE_PATTERN = re.compile(r".*_(\d{4}-\d{2}-\d{2})")
+
+
+def parse_time(t):
+    return datetime.strptime(t, DATE_FORMAT)
+
+
+def load_files():
+    rows = []
+    for file in os.listdir(DATA_FOLDER):
+        if file.endswith(".csv"):
+            match = FILENAME_DATE_PATTERN.match(file)
+            if not match:
+                print(f"Skipping invalid filename: {file}")
+                continue
+
+            file_date = datetime.strptime(match.group(1), "%Y-%m-%d").date()
+            path = os.path.join(DATA_FOLDER, file)
+
+            try:
+                df = pd.read_csv(path)
+            except:
+                print(f"Could not read: {file}")
+                continue
+
+            df["file_date"] = file_date
+
+            rows.append(df)
+
+    if not rows:
+        return pd.DataFrame()
+
+    return pd.concat(rows, ignore_index=True)
+
+
+def add_time_taken(df):
+    df["StartTimeParsed"] = df["Start Time"].apply(parse_time)
+    df["EndTimeParsed"] = df["End Time"].apply(parse_time)
+    df["TimeTakenSeconds"] = (df["EndTimeParsed"] - df["StartTimeParsed"]).dt.total_seconds()
+    return df
+
+
+def push_data(df, job_name, value_columns, label_columns):
+    registry = CollectorRegistry()
+
+    gauges = {}
+    for col in value_columns:
+        gauges[col] = Gauge(
+            f"new_data_{job_name}_{col.lower()}",
+            f"{col} for {job_name}",
+            label_columns,
+            registry=registry
+        )
+
+    for _, row in df.iterrows():
+        labels = {col: str(row[col]) for col in label_columns}
+        for col in value_columns:
+            gauges[col].labels(**labels).set(float(row[col]))
+
+    push_to_gateway(PUSHGATEWAY, job=job_name, registry=registry)
+
+
+def main():
+    df = load_files()
+    if df.empty:
+        print("No valid files found.")
+        return
+
+    df = add_time_taken(df)
+
+    today = datetime.now().date()
+    yesterday = today - timedelta(days=1)
+    last7 = today - timedelta(days=7)
+    last30 = today - timedelta(days=30)
+
+    # Non-summary
+    non_summary = df[df["Summary"] == "No"]
+    non_summary = non_summary[
+        ["BPName", "ThreadID", "JobDetails", "JobID", "file_date", "Duration", "No of Trades", "DurationPerTrade", "TimeTakenSeconds"]
+    ]
+
+    push_data(
+        non_summary, "bp_non_summary_raw",
+        ["Duration", "No of Trades", "DurationPerTrade", "TimeTakenSeconds"],
+        ["BPName", "ThreadID", "JobDetails", "JobID", "file_date"]
+    )
+
+    # Summary
+    summary = df[df["Summary"] == "Yes"]
+    summary = summary[
+        ["JobDetails", "file_date", "Average Duration", "Job Count", "Total Trades", "TimeTakenSeconds"]
+    ]
+
+    push_data(
+        summary, "bp_summary_raw",
+        ["Average Duration", "Job Count", "Total Trades", "TimeTakenSeconds"],
+        ["JobDetails", "file_date"]
+    )
+
+    print("✅ Data pushed successfully.")
+
+
+if __name__ == "__main__":
+    main()
