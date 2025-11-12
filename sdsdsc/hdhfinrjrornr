@@ -1,0 +1,103 @@
+import os
+import re
+import pandas as pd
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# ---------- CONFIG ----------
+DATA_FOLDER = r"C:\bpmetrics\data"   # change if needed
+PUSHGATEWAY_URL = "http://localhost:9091"
+TIMEZONE = ZoneInfo("Asia/Kolkata")
+
+# ---------- HELPERS ----------
+def extract_date_from_filename(filename):
+    """Extract YYYY-MM-DD from filename."""
+    match = re.search(r"(\d{4}-\d{2}-\d{2})", filename)
+    if match:
+        return datetime.strptime(match.group(1), "%Y-%m-%d").date()
+    return None
+
+
+def get_time_windows():
+    today = datetime.now(TIMEZONE).date()
+    return {
+        "today": (today, today),
+        "yesterday": (today - timedelta(days=1), today - timedelta(days=1)),
+        "last_7_days": (today - timedelta(days=7), today),
+        "last_30_days": (today - timedelta(days=30), today)
+    }
+
+# ---------- MAIN ----------
+def main():
+    registry = CollectorRegistry()
+    gauge = Gauge(
+        "bp_non_summary_aggregated",
+        "Aggregated Non Summary Data",
+        ["bpname", "jobdetails", "window"],
+        registry=registry
+    )
+
+    time_windows = get_time_windows()
+    files = [f for f in os.listdir(DATA_FOLDER) if f.lower().endswith(".csv") and "_summary" not in f.lower()]
+
+    print("\n=== DEBUG FILE DATE WINDOW CHECK ===")
+    for f in files:
+        fpath = os.path.join(DATA_FOLDER, f)
+        fdate = extract_date_from_filename(f)
+        if not fdate:
+            print(f"❌ Skipped {f} (no date found)")
+            continue
+
+        matched_windows = []
+        for wname, (start, end) in time_windows.items():
+            if start <= fdate <= end:
+                matched_windows.append(wname)
+
+        if matched_windows:
+            print(f"✅ {f} → Date {fdate} → Windows: {matched_windows}")
+        else:
+            print(f"⚠️ {f} → Date {fdate} → No matching window")
+
+    print("====================================\n")
+
+    combined = []
+    for f in files:
+        fdate = extract_date_from_filename(f)
+        if not fdate:
+            continue
+
+        # Find windows this file belongs to
+        file_windows = [w for w, (start, end) in time_windows.items() if start <= fdate <= end]
+        if not file_windows:
+            continue
+
+        df = pd.read_csv(os.path.join(DATA_FOLDER, f))
+        if df.empty:
+            print(f"⚠️ Empty file: {f}")
+            continue
+
+        # Normalize columns
+        df.columns = df.columns.str.strip()
+        df = df.rename(columns=lambda x: x.replace(" ", "_"))
+        df["FileDate"] = str(fdate)
+
+        for w in file_windows:
+            for _, row in df.iterrows():
+                try:
+                    bpname = str(row.get("BP_NAME", "unknown"))
+                    jobdetails = str(row.get("JobDetails", "unknown"))
+                    trades = float(row.get("No_of_trades", 0))
+                    gauge.labels(bpname=bpname, jobdetails=jobdetails, window=w).set(trades)
+                except Exception as e:
+                    print(f"❌ Error processing row in {f}: {e}")
+
+    if len(gauge._metrics) == 0:
+        print("🚫 No valid metrics to push. Check date matching above.")
+    else:
+        push_to_gateway(PUSHGATEWAY_URL, job="bp_non_summary_trades_debug", registry=registry)
+        print(f"✅ Metrics pushed successfully to {PUSHGATEWAY_URL}")
+
+# ---------- RUN ----------
+if __name__ == "__main__":
+    main()
