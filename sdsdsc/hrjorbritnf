@@ -1,0 +1,120 @@
+import os
+import re
+import pandas as pd
+from datetime import datetime, timedelta
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# ------------------- CONFIG -------------------
+DATA_DIR = "C:/path/to/csv/files"   # Change to your folder path
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "bp_non_summary_push"
+# ----------------------------------------------
+
+# Map window durations
+WINDOWS = {
+    "today": 0,
+    "yesterday": 1,
+    "last7days": 7,
+    "last30days": 30
+}
+
+def extract_date_from_filename(filename):
+    """Extract YYYY-MM-DD date from filename."""
+    match = re.search(r'(\d{4}-\d{2}-\d{2})', filename)
+    if match:
+        return datetime.strptime(match.group(1), "%Y-%m-%d").date()
+    return None
+
+def get_window_for_date(file_date, today):
+    """Return which window the file_date belongs to."""
+    delta = (today - file_date).days
+    if delta == 0:
+        return "today"
+    elif delta == 1:
+        return "yesterday"
+    elif 1 < delta <= 7:
+        return "last7days"
+    elif 1 < delta <= 30:
+        return "last30days"
+    return None
+
+def process_and_push():
+    today = datetime.now().date()
+    registry = CollectorRegistry()
+    g = Gauge(
+        "bp_non_summary_aggregated",
+        "Aggregated BP Non Summary data (sum of No of trades)",
+        [
+            "bpname", "threadid", "jobid", "starttime", "endtime",
+            "duration", "durationpertrade", "jobdetails",
+            "window", "file_date", "file_name"
+        ],
+        registry=registry
+    )
+
+    for filename in os.listdir(DATA_DIR):
+        if not filename.endswith(".csv"):
+            continue
+
+        file_date = extract_date_from_filename(filename)
+        if not file_date:
+            continue
+
+        window = get_window_for_date(file_date, today)
+        if not window:
+            continue
+
+        filepath = os.path.join(DATA_DIR, filename)
+        try:
+            df = pd.read_csv(filepath)
+
+            # Standardize column names
+            df.columns = [c.strip() for c in df.columns]
+
+            required_cols = [
+                "BP NAME", "Thread ID", "JOB ID", "Start Time", "End Time",
+                "Duration", "No of trades", "DurationPerTrade", "JobDetails"
+            ]
+            if not all(col in df.columns for col in required_cols):
+                print(f"Skipping {filename} - missing columns")
+                continue
+
+            df["No of trades"] = pd.to_numeric(df["No of trades"], errors="coerce").fillna(0)
+
+            # Group and sum trades per BP + JobDetails
+            grouped = df.groupby(["BP NAME", "JobDetails"]).agg({
+                "No of trades": "sum",
+                "Thread ID": "first",
+                "JOB ID": "first",
+                "Start Time": "first",
+                "End Time": "first",
+                "Duration": "first",
+                "DurationPerTrade": "first"
+            }).reset_index()
+
+            for _, row in grouped.iterrows():
+                g.labels(
+                    bpname=str(row["BP NAME"]),
+                    threadid=str(row["Thread ID"]),
+                    jobid=str(row["JOB ID"]),
+                    starttime=str(row["Start Time"]),
+                    endtime=str(row["End Time"]),
+                    duration=str(row["Duration"]),
+                    durationpertrade=str(row["DurationPerTrade"]),
+                    jobdetails=str(row["JobDetails"]),
+                    window=window,
+                    file_date=str(file_date),
+                    file_name=filename
+                ).set(float(row["No of trades"]))
+
+        except Exception as e:
+            print(f"Error processing {filename}: {e}")
+
+    if len(registry._names_to_collectors) > 0:
+        push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+        print(f"✅ Metrics pushed successfully for job '{JOB_NAME}'")
+    else:
+        print("⚠️ No valid data found to push.")
+
+if __name__ == "__main__":
+    process_and_push()
