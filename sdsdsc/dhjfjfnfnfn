@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""
+push_bp_non_summary_trades_sum.py
+
+Reads multiple non-summary CSV files (like FocusBP_ProdLon_x64__2025-11-11.csv),
+extracts date from filename, calculates sum(No of trades) grouped by BP Name + JobDetails,
+adds time windows (today/yesterday/last7days/last30days),
+and pushes all as a single Prometheus gauge to Pushgateway.
+
+Requirements:
+    pip install pandas prometheus_client
+"""
+
+import os
+import re
+import pandas as pd
+from datetime import datetime, timedelta, timezone
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# Timezone (IST)
+try:
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+except Exception:
+    IST = timezone(timedelta(hours=5, minutes=30))
+
+# ---------------- CONFIG ----------------
+DATA_FOLDER = r"C:\bpmetrics\data"   # Change if needed
+PUSHGATEWAY = "http://localhost:9091"
+JOB_NAME = "bp_non_summary_trades_sum"
+GAUGE_NAME = "bp_non_summary_trades_sum"
+
+# ---------------- HELPERS ----------------
+def extract_date_from_filename(fname):
+    """Extract date (YYYY-MM-DD) from filename."""
+    m = re.findall(r"(\d{4}-\d{2}-\d{2})", fname)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m[-1], "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+def windows_for_date(d, today):
+    """Return list of time windows that this date belongs to."""
+    if d is None:
+        return []
+    yesterday = today - timedelta(days=1)
+    windows = []
+    if d == today:
+        windows.append("today")
+    if d == yesterday:
+        windows.append("yesterday")
+    if (today - timedelta(days=6)) <= d <= today:
+        windows.append("last_7_days")
+    if (today - timedelta(days=29)) <= d <= today:
+        windows.append("last_30_days")
+    return windows
+
+def read_csv_safely(path):
+    try:
+        return pd.read_csv(path)
+    except UnicodeDecodeError:
+        return pd.read_csv(path, encoding="latin-1")
+    except Exception as e:
+        print(f"Error reading {path}: {e}")
+        return pd.DataFrame()
+
+# ---------------- MAIN ----------------
+def main():
+    now_ist = datetime.now(IST)
+    today_date = now_ist.date()
+
+    all_rows = []
+    files = [f for f in os.listdir(DATA_FOLDER) if f.lower().endswith(".csv") and "_summary" not in f.lower()]
+    if not files:
+        print("No non-summary CSV files found.")
+        return
+
+    for fname in files:
+        full = os.path.join(DATA_FOLDER, fname)
+        file_date = extract_date_from_filename(fname)
+        df = read_csv_safely(full)
+        if df.empty:
+            print(f"Skipping empty/unreadable: {fname}")
+            continue
+
+        # Clean up
+        df.columns = [c.strip() for c in df.columns]
+        df["file_name"] = fname
+        df["file_date"] = file_date
+
+        # Expected columns
+        required_cols = [
+            "BP Name", "Thread ID", "JOB ID", "Start Time", "End Time",
+            "Duration", "No of trades", "DurationPerTrade", "JobDetails"
+        ]
+
+        for col in required_cols:
+            if col not in df.columns:
+                print(f"Column {col} missing in {fname}")
+                return
+
+        # Convert numeric fields
+        df["No of trades"] = pd.to_numeric(df["No of trades"], errors="coerce").fillna(0)
+        df["Duration"] = pd.to_numeric(df["Duration"], errors="coerce").fillna(0)
+        df["DurationPerTrade"] = pd.to_numeric(df["DurationPerTrade"], errors="coerce").fillna(0)
+
+        all_rows.append(df)
+
+    # Combine all data
+    data = pd.concat(all_rows, ignore_index=True)
+    if data.empty:
+        print("No data to push.")
+        return
+
+    # Sum trades per BP + JobDetails
+    grouped = data.groupby(["BP Name", "JobDetails", "file_name", "file_date"], as_index=False)["No of trades"].sum()
+
+    # For merging label info
+    data_unique = data.drop_duplicates(subset=["BP Name", "JobDetails"])
+    merged = pd.merge(grouped, data_unique, on=["BP Name", "JobDetails"], how="left")
+
+    # Setup gauge
+    registry = CollectorRegistry()
+    label_keys = [
+        "bp_name", "jobdetails", "threadid", "jobid",
+        "start_time", "end_time", "duration", "durationpertrade",
+        "file_name", "file_date", "window"
+    ]
+    gauge = Gauge(GAUGE_NAME, "Sum of No of trades per BP and JobDetails", labelnames=label_keys, registry=registry)
+
+    pushed = 0
+    for _, row in merged.iterrows():
+        fdate = row.get("file_date")
+        windows = windows_for_date(fdate, today_date)
+        if not windows:
+            continue
+
+        for w in windows:
+            try:
+                gauge.labels(
+                    bp_name=str(row["BP Name"]),
+                    jobdetails=str(row["JobDetails"]),
+                    threadid=str(row["Thread ID"]),
+                    jobid=str(row["JOB ID"]),
+                    start_time=str(row["Start Time"]),
+                    end_time=str(row["End Time"]),
+                    duration=str(row["Duration"]),
+                    durationpertrade=str(row["DurationPerTrade"]),
+                    file_name=str(row["file_name"]),
+                    file_date=str(row["file_date"]),
+                    window=w
+                ).set(float(row["No of trades"]))
+                pushed += 1
+            except Exception as e:
+                print(f"Error setting gauge: {e}")
+
+    if pushed > 0:
+        try:
+            push_to_gateway(PUSHGATEWAY, job=JOB_NAME, registry=registry)
+            print(f"Pushed {pushed} metrics successfully to {PUSHGATEWAY}")
+        except Exception as e:
+            print(f"Push failed: {e}")
+    else:
+        print("No metrics to push (no valid data).")
+
+if __name__ == "__main__":
+    main()
