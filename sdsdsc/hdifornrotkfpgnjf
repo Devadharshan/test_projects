@@ -1,0 +1,123 @@
+import os
+import glob
+import pandas as pd
+from datetime import datetime
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# ---------- CONFIG ----------
+CSV_FOLDER = "C:/path/to/csv/folder"
+PUSHGATEWAY = "http://localhost:9091"
+JOB_NAME = "bp_non_summary_aggregated_all_labels"
+# ----------------------------
+
+def get_time_window(file_date):
+    today = datetime.now().date()
+    delta = (today - file_date).days
+    if delta == 0:
+        return "today"
+    elif delta == 1:
+        return "yesterday"
+    elif delta <= 7:
+        return "last7days"
+    elif delta <= 30:
+        return "last30days"
+    else:
+        return None  # ignore old files
+
+def parse_date_from_filename(filename):
+    try:
+        date_part = filename.split("__")[-1].split(".csv")[0]
+        return datetime.strptime(date_part, "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+def safe_str(x):
+    return str(x) if pd.notna(x) else ""
+
+def main():
+    registry = CollectorRegistry()
+
+    # Common label keys (all columns + computed fields)
+    label_keys = [
+        "BP_NAME", "Thread_ID", "JOB_ID", "Start_Time", "End_Time",
+        "Duration", "No_of_trades", "DurationPerTrade", "JobDetails",
+        "CalculatedDuration", "Window", "FileDate"
+    ]
+
+    # Define gauges
+    gauge_total_trades = Gauge("bp_total_trades", "Total trades per BP and job", label_keys, registry=registry)
+    gauge_avg_duration_per_trade = Gauge("bp_avg_duration_per_trade", "Average duration per trade", label_keys, registry=registry)
+    gauge_avg_calculated_duration = Gauge("bp_avg_calculated_duration", "Average duration (calculated from Start/End time)", label_keys, registry=registry)
+
+    csv_files = glob.glob(os.path.join(CSV_FOLDER, "*.csv"))
+    if not csv_files:
+        print("⚠️ No CSV files found.")
+        return
+
+    total_files_processed = 0
+    for file in csv_files:
+        file_date = parse_date_from_filename(os.path.basename(file))
+        if not file_date:
+            print(f"Skipping file (no valid date): {file}")
+            continue
+
+        window = get_time_window(file_date)
+        if not window:
+            print(f"Skipping file (too old): {file}")
+            continue
+
+        try:
+            df = pd.read_csv(file)
+        except Exception as e:
+            print(f"Error reading {file}: {e}")
+            continue
+
+        # Validate required columns
+        required_cols = ["BP NAME", "Thread ID", "JOB ID", "Start Time", "End Time", "Duration", "No of trades", "DurationPerTrade", "JobDetails"]
+        if not all(col in df.columns for col in required_cols):
+            print(f"Missing columns in {file}, skipping.")
+            continue
+
+        # Compute calculated duration
+        df["Start Time"] = pd.to_datetime(df["Start Time"], errors="coerce")
+        df["End Time"] = pd.to_datetime(df["End Time"], errors="coerce")
+        df["CalculatedDuration"] = (df["End Time"] - df["Start Time"]).dt.total_seconds().fillna(0)
+
+        # Iterate through all rows and push as metrics
+        for _, row in df.iterrows():
+            labels = {
+                "BP_NAME": safe_str(row["BP NAME"]),
+                "Thread_ID": safe_str(row["Thread ID"]),
+                "JOB_ID": safe_str(row["JOB ID"]),
+                "Start_Time": safe_str(row["Start Time"]),
+                "End_Time": safe_str(row["End Time"]),
+                "Duration": safe_str(row["Duration"]),
+                "No_of_trades": safe_str(row["No of trades"]),
+                "DurationPerTrade": safe_str(row["DurationPerTrade"]),
+                "JobDetails": safe_str(row["JobDetails"]),
+                "CalculatedDuration": safe_str(row["CalculatedDuration"]),
+                "Window": window,
+                "FileDate": str(file_date)
+            }
+
+            try:
+                trades = float(row["No of trades"]) if pd.notna(row["No of trades"]) else 0
+                dur_per_trade = float(row["DurationPerTrade"]) if pd.notna(row["DurationPerTrade"]) else 0
+                calc_dur = float(row["CalculatedDuration"]) if pd.notna(row["CalculatedDuration"]) else 0
+
+                gauge_total_trades.labels(**labels).set(trades)
+                gauge_avg_duration_per_trade.labels(**labels).set(dur_per_trade)
+                gauge_avg_calculated_duration.labels(**labels).set(calc_dur)
+            except Exception as e:
+                print(f"Error pushing metric for row: {e}")
+
+        total_files_processed += 1
+
+    if total_files_processed > 0:
+        push_to_gateway(PUSHGATEWAY, job=JOB_NAME, registry=registry)
+        print(f"✅ Successfully pushed metrics for {total_files_processed} files.")
+    else:
+        print("⚠️ No valid data to push.")
+
+if __name__ == "__main__":
+    main()
