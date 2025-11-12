@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""
+push_bp_non_summary_trades_sum.py
+
+Reads non-summary CSVs like FocusBP_ProdLon_x64__2025-11-11.csv,
+extracts date from filename, sums 'No of trades' by BP NAME + JobDetails,
+and pushes to Pushgateway with time windows (today, yesterday, last7days, last30days).
+"""
+
+import os
+import re
+import pandas as pd
+from datetime import datetime, timedelta, timezone
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# Timezone (IST)
+try:
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+except Exception:
+    IST = timezone(timedelta(hours=5, minutes=30))
+
+# ---------------- CONFIG ----------------
+DATA_FOLDER = r"C:\bpmetrics\data"   # change if needed
+PUSHGATEWAY = "http://localhost:9091"
+JOB_NAME = "bp_non_summary_trades_sum"
+GAUGE_NAME = "bp_non_summary_trades_sum"
+
+# ---------------- HELPERS ----------------
+def extract_date_from_filename(fname):
+    """Extract date (YYYY-MM-DD) from filename."""
+    m = re.findall(r"(\d{4}-\d{2}-\d{2})", fname)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m[-1], "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+def windows_for_date(d, today):
+    """Return list of time windows that this date belongs to."""
+    if d is None:
+        return []
+    yesterday = today - timedelta(days=1)
+    windows = []
+    if d == today:
+        windows.append("today")
+    if d == yesterday:
+        windows.append("yesterday")
+    if (today - timedelta(days=6)) <= d <= today:
+        windows.append("last_7_days")
+    if (today - timedelta(days=29)) <= d <= today:
+        windows.append("last_30_days")
+    return windows
+
+def read_csv_safely(path):
+    try:
+        return pd.read_csv(path)
+    except UnicodeDecodeError:
+        return pd.read_csv(path, encoding="latin-1")
+    except Exception as e:
+        print(f"Error reading {path}: {e}")
+        return pd.DataFrame()
+
+def normalize_columns(df):
+    """Make columns case-insensitive by converting to lowercase and stripping."""
+    df.columns = [c.strip().lower() for c in df.columns]
+    return df
+
+# ---------------- MAIN ----------------
+def main():
+    now_ist = datetime.now(IST)
+    today_date = now_ist.date()
+
+    all_rows = []
+    files = [f for f in os.listdir(DATA_FOLDER) if f.lower().endswith(".csv") and "_summary" not in f.lower()]
+    if not files:
+        print("No non-summary CSV files found.")
+        return
+
+    for fname in files:
+        full = os.path.join(DATA_FOLDER, fname)
+        file_date = extract_date_from_filename(fname)
+        df = read_csv_safely(full)
+        if df.empty:
+            print(f"Skipping empty/unreadable: {fname}")
+            continue
+
+        df = normalize_columns(df)
+        df["file_name"] = fname
+        df["file_date"] = file_date
+
+        # Map column names dynamically
+        colmap = {
+            "bp name": "bp_name",
+            "thread id": "thread_id",
+            "job id": "job_id",
+            "start time": "start_time",
+            "end time": "end_time",
+            "duration": "duration",
+            "no of trades": "no_of_trades",
+            "durationpertrade": "duration_per_trade",
+            "jobdetails": "jobdetails"
+        }
+
+        # Ensure all required columns exist
+        for key in colmap.keys():
+            if key not in df.columns:
+                print(f"Column '{key}' missing in {fname}")
+                return
+
+        # Rename columns
+        df = df.rename(columns=colmap)
+
+        # Convert numeric fields
+        df["no_of_trades"] = pd.to_numeric(df["no_of_trades"], errors="coerce").fillna(0)
+        df["duration"] = pd.to_numeric(df["duration"], errors="coerce").fillna(0)
+        df["duration_per_trade"] = pd.to_numeric(df["duration_per_trade"], errors="coerce").fillna(0)
+
+        all_rows.append(df)
+
+    # Combine all data
+    data = pd.concat(all_rows, ignore_index=True)
+    if data.empty:
+        print("No data to push.")
+        return
+
+    # Sum trades per BP + JobDetails
+    grouped = data.groupby(["bp_name", "jobdetails", "file_name", "file_date"], as_index=False)["no_of_trades"].sum()
+
+    # For merging label info
+    data_unique = data.drop_duplicates(subset=["bp_name", "jobdetails"])
+    merged = pd.merge(grouped, data_unique, on=["bp_name", "jobdetails"], how="left")
+
+    # Setup gauge
+    registry = CollectorRegistry()
+    label_keys = [
+        "bp_name", "jobdetails", "thread_id", "job_id",
+        "start_time", "end_time", "duration", "duration_per_trade",
+        "file_name", "file_date", "window"
+    ]
+    gauge = Gauge(GAUGE_NAME, "Sum of No of trades per BP and JobDetails", labelnames=label_keys, registry=registry)
+
+    pushed = 0
+    for _, row in merged.iterrows():
+        fdate = row.get("file_date")
+        windows = windows_for_date(fdate, today_date)
+        if not windows:
+            continue
+
+        for w in windows:
+            try:
+                gauge.labels(
+                    bp_name=str(row["bp_name"]),
+                    jobdetails=str(row["jobdetails"]),
+                    thread_id=str(row["thread_id"]),
+                    job_id=str(row["job_id"]),
+                    start_time=str(row["start_time"]),
+                    end_time=str(row["end_time"]),
+                    duration=str(row["duration"]),
+                    duration_per_trade=str(row["duration_per_trade"]),
+                    file_name=str(row["file_name"]),
+                    file_date=str(row["file_date"]),
+                    window=w
+                ).set(float(row["no_of_trades"]))
+                pushed += 1
+            except Exception as e:
+                print(f"Error setting gauge: {e}")
+
+    if pushed > 0:
+        try:
+            push_to_gateway(PUSHGATEWAY, job=JOB_NAME, registry=registry)
+            print(f"Pushed {pushed} metrics successfully to {PUSHGATEWAY}")
+        except Exception as e:
+            print(f"Push failed: {e}")
+    else:
+        print("No metrics to push (no valid data).")
+
+if __name__ == "__main__":
+    main()
