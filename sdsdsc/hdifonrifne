@@ -1,0 +1,105 @@
+import os
+import glob
+import pandas as pd
+from datetime import datetime, timedelta
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# ---------- CONFIG ----------
+CSV_FOLDER = "C:/path/to/csv/folder"
+PUSHGATEWAY = "http://localhost:9091"
+JOB_NAME = "bp_non_summary_aggregated"
+# ----------------------------
+
+def get_time_window(file_date):
+    today = datetime.now().date()
+    delta = (today - file_date).days
+    if delta == 0:
+        return "today"
+    elif delta == 1:
+        return "yesterday"
+    elif delta <= 7:
+        return "last7days"
+    elif delta <= 30:
+        return "last30days"
+    else:
+        return None  # older files ignored
+
+def parse_date_from_filename(filename):
+    try:
+        date_part = filename.split("__")[-1].split(".csv")[0]
+        return datetime.strptime(date_part, "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+def safe_str(x):
+    return str(x) if pd.notna(x) else ""
+
+def main():
+    registry = CollectorRegistry()
+    gauge_total_trades = Gauge("bp_total_trades", "Total trades per job", ["BP_NAME", "JobDetails", "Window", "FileDate"], registry=registry)
+    gauge_avg_duration_per_trade = Gauge("bp_avg_duration_per_trade", "Avg Duration per trade", ["BP_NAME", "JobDetails", "Window", "FileDate"], registry=registry)
+    gauge_avg_calculated_duration = Gauge("bp_avg_calculated_duration", "Avg duration (calculated from Start/End time)", ["BP_NAME", "JobDetails", "Window", "FileDate"], registry=registry)
+
+    csv_files = glob.glob(os.path.join(CSV_FOLDER, "*.csv"))
+    if not csv_files:
+        print("⚠️ No CSV files found.")
+        return
+
+    total_files_processed = 0
+    for file in csv_files:
+        file_date = parse_date_from_filename(os.path.basename(file))
+        if not file_date:
+            print(f"Skipping file (no valid date): {file}")
+            continue
+
+        window = get_time_window(file_date)
+        if not window:
+            print(f"Skipping file (too old): {file}")
+            continue
+
+        try:
+            df = pd.read_csv(file)
+        except Exception as e:
+            print(f"Error reading {file}: {e}")
+            continue
+
+        # Ensure required columns exist
+        if not all(col in df.columns for col in ["BP NAME", "JobDetails", "No of trades", "Start Time", "End Time"]):
+            print(f"Missing columns in {file}, skipping.")
+            continue
+
+        # Compute Calculated Duration
+        df["Start Time"] = pd.to_datetime(df["Start Time"], errors="coerce")
+        df["End Time"] = pd.to_datetime(df["End Time"], errors="coerce")
+        df["CalculatedDuration"] = (df["End Time"] - df["Start Time"]).dt.total_seconds()
+
+        # Group by BP NAME + JobDetails
+        grouped = df.groupby(["BP NAME", "JobDetails"], dropna=False).agg({
+            "No of trades": "sum",
+            "DurationPerTrade": "mean",
+            "CalculatedDuration": "mean"
+        }).reset_index()
+
+        for _, row in grouped.iterrows():
+            labels = {
+                "BP_NAME": safe_str(row["BP NAME"]),
+                "JobDetails": safe_str(row["JobDetails"]),
+                "Window": window,
+                "FileDate": str(file_date)
+            }
+
+            # Push all 3 metrics
+            gauge_total_trades.labels(**labels).set(float(row["No of trades"]))
+            gauge_avg_duration_per_trade.labels(**labels).set(float(row["DurationPerTrade"]) if pd.notna(row["DurationPerTrade"]) else 0)
+            gauge_avg_calculated_duration.labels(**labels).set(float(row["CalculatedDuration"]) if pd.notna(row["CalculatedDuration"]) else 0)
+
+        total_files_processed += 1
+
+    if total_files_processed > 0:
+        push_to_gateway(PUSHGATEWAY, job=JOB_NAME, registry=registry)
+        print(f"✅ Successfully pushed metrics for {total_files_processed} files.")
+    else:
+        print("⚠️ No valid data to push.")
+
+if __name__ == "__main__":
+    main()
