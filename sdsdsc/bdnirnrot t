@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+"""
+push_bp_detailed_insights_all_labels_fixed.py
+
+- Reads non-summary CSVs in CSV_DIR
+- Extracts file_date from filename (YYYY-MM-DD)
+- Determines windows: today, yesterday, last7days, last30days
+- For each row pushes:
+    - bp_job_duration_seconds
+    - bp_job_trades_count
+    - bp_job_duration_per_trade_seconds
+    - bp_job_duration_deviation
+  with ALL non-numeric CSV columns as labels + window + file_date
+
+Fixes the "no label names were sent when constructing gauge" error by
+ensuring Gauges are created with the exact set of label names.
+"""
+import os
+import re
+import pandas as pd
+from datetime import datetime, timedelta, timezone
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# ---------- CONFIG ----------
+CSV_DIR = r"C:\bpmetrics\data"        # << change this
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "bp_detailed_insights_all_labels_fixed"
+
+# timezone for "today"
+IST = timezone(timedelta(hours=5, minutes=30))
+
+# which windows to include
+WINDOWS = {
+    "today": 0,
+    "yesterday": 1,
+    "last7days": 7,
+    "last30days": 30
+}
+
+# numeric columns we will treat as metric values (case-insensitive)
+NUMERIC_COL_CANDIDATES = {"duration", "no of trades", "durationpertrade"}
+
+# ---------- HELPERS ----------
+def parse_date_from_filename(filename: str):
+    m = re.findall(r"(\d{4}-\d{2}-\d{2})", filename)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m[-1], "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+def determine_windows(file_date, today_date):
+    if file_date is None:
+        return []
+    win = []
+    yesterday = today_date - timedelta(days=1)
+    if file_date == today_date:
+        win.append("today")
+    if file_date == yesterday:
+        win.append("yesterday")
+    if (today_date - timedelta(days=6)) <= file_date <= today_date:
+        win.append("last7days")
+    if (today_date - timedelta(days=29)) <= file_date <= today_date:
+        win.append("last30days")
+    return win
+
+_prom_label_re = re.compile(r'[^a-z0-9_]')
+
+def clean_label_key(colname: str) -> str:
+    """Make a Prometheus-safe label name from an arbitrary column name."""
+    s = str(colname).strip().lower()
+    s = s.replace(" ", "_")
+    s = _prom_label_re.sub("_", s)
+    if not s:
+        return "k_empty"
+    if not re.match(r'^[a-z_]', s):
+        s = "k_" + s
+    # labels must be <= 64 chars ideally (Prometheus allows longer but be reasonable)
+    return s[:200]
+
+def clean_label_value(v) -> str:
+    if pd.isna(v):
+        return "unknown"
+    s = str(v)
+    # allow typical safe chars, convert others to underscore
+    s = re.sub(r'[^A-Za-z0-9_\-.:/@]', '_', s)
+    return s if s != "" else "unknown"
+
+# ---------- MAIN ----------
+def main():
+    today = datetime.now(IST).date()
+
+    # gather files that fall into any window
+    files = []
+    for fn in os.listdir(CSV_DIR):
+        if not fn.lower().endswith(".csv"):
+            continue
+        if "_summary" in fn.lower():
+            continue
+        fd = parse_date_from_filename(fn)
+        if fd is None:
+            # optionally print: print(f"No date in filename: {fn}")
+            continue
+        wins = determine_windows(fd, today)
+        if wins:
+            files.append((fn, fd, wins))
+
+    if not files:
+        print("No CSV files matching windows found.")
+        return
+
+    # We'll build one registry and set of Gauges per run.
+    registry = CollectorRegistry()
+
+    # To determine label names we inspect the first file's columns (but ensure we include file_date and window)
+    # We will include ALL non-numeric columns as labels.
+    sample_path = os.path.join(CSV_DIR, files[0][0])
+    try:
+        sample_df = pd.read_csv(sample_path, nrows=5)
+    except Exception as e:
+        print("Failed reading sample file to determine columns:", e)
+        return
+
+    # normalize original column names (preserve original case for reading but map to cleaned labels)
+    original_columns = [c.strip() for c in sample_df.columns]
+
+    # Identify numeric columns present (case-insensitive)
+    numeric_cols = set()
+    for col in original_columns:
+        if col.strip().lower() in NUMERIC_COL_CANDIDATES:
+            numeric_cols.add(col)
+
+    # Build label columns: all columns except numeric ones. Always include file_date and window labels.
+    label_cols = [col for col in original_columns if col not in numeric_cols]
+    # ensure file_date and window will be present as label names (they are synthetic)
+    label_names_clean = [clean_label_key(c) for c in label_cols]
+    # append window and file_date to label list (ensure uniqueness)
+    if "window" not in label_names_clean:
+        label_names_clean.append("window")
+    if "file_date" not in label_names_clean:
+        label_names_clean.append("file_date")
+
+    # Ensure we have at least one label (prom client allows zero labels but our usage uses labels dict)
+    # We guarantee we have file_date and window so label_names_clean non-empty.
+
+    # Create gauges with these label names
+    try:
+        g_duration = Gauge("bp_job_duration_seconds", "Job duration (seconds)", labelnames=label_names_clean, registry=registry)
+        g_trades = Gauge("bp_job_trades_count", "Number of trades for job", labelnames=label_names_clean, registry=registry)
+        g_dpt = Gauge("bp_job_duration_per_trade_seconds", "Duration per trade for job", labelnames=label_names_clean, registry=registry)
+        g_dev = Gauge("bp_job_duration_deviation_percent", "Duration deviation from BP average (%)", labelnames=label_names_clean, registry=registry)
+    except Exception as e:
+        print("Failed to create Gauges with labels:", e)
+        return
+
+    total_set = 0
+
+    # Process each file
+    for fn, file_date, wins in files:
+        fpath = os.path.join(CSV_DIR, fn)
+        try:
+            df = pd.read_csv(fpath, dtype=str)  # read as strings, convert numeric columns later
+        except Exception as e:
+            print(f"Failed to read {fn}: {e}")
+            continue
+
+        # normalize column names trimming spaces
+        df.columns = [c.strip() for c in df.columns]
+
+        # ensure numeric columns exist and convert them
+        for cand in NUMERIC_COL_CANDIDATES:
+            # find actual column name (case-insensitive)
+            match = next((c for c in df.columns if c.strip().lower() == cand), None)
+            if match:
+                df[match] = pd.to_numeric(df[match], errors="coerce").fillna(0)
+            else:
+                # add column with zeros if missing
+                df[cand] = 0.0  # safe fallback; label_cols won't include it if it's new
+        # recompute numeric column names normalized to the actual header if present:
+        duration_col = next((c for c in df.columns if c.strip().lower() == "duration"), None)
+        trades_col = next((c for c in df.columns if c.strip().lower() == "no of trades"), None)
+        dpt_col = next((c for c in df.columns if c.strip().lower() == "durationpertrade"), None)
+
+        # compute BP-level averages for deviation
+        if "BP NAME" in df.columns:
+            # convert 'DURATION' to numeric if it's string
+            df_numeric_duration = pd.to_numeric(df[duration_col], errors="coerce").fillna(0) if duration_col else pd.Series(0, index=df.index)
+            bp_avg_map = df.groupby("BP NAME")[duration_col].apply(lambda s: pd.to_numeric(s, errors="coerce").mean()).to_dict()
+        else:
+            bp_avg_map = {}
+
+        # iterate rows
+        for _, row in df.iterrows():
+            for win in wins:
+                # build labels dict using label_cols (non-numeric columns from sample)
+                labels = {}
+                for orig_col in label_cols:
+                    # Some files might have slightly different columns; use get with fallback
+                    if orig_col in row:
+                        labels[clean_label_key(orig_col)] = clean_label_value(row[orig_col])
+                    else:
+                        labels[clean_label_key(orig_col)] = "unknown"
+
+                labels["window"] = win
+                labels["file_date"] = str(file_date)
+
+                # compute numeric values for this row
+                try:
+                    dur = float(row.get(duration_col, 0)) if duration_col in row else 0.0
+                except Exception:
+                    dur = 0.0
+                try:
+                    trades = float(row.get(trades_col, 0)) if trades_col in row else 0.0
+                except Exception:
+                    trades = 0.0
+                try:
+                    dpt = float(row.get(dpt_col, 0)) if dpt_col in row else (dur / trades if trades > 0 else 0.0)
+                except Exception:
+                    dpt = 0.0
+
+                # deviation from BP average (percent)
+                bp_name_val = row.get("BP NAME", None)
+                dev = 0.0
+                try:
+                    if bp_name_val and bp_name_val in bp_avg_map and pd.notna(bp_avg_map[bp_name_val]) and bp_avg_map[bp_name_val] > 0:
+                        dev = ((dur - bp_avg_map[bp_name_val]) / bp_avg_map[bp_name_val]) * 100.0
+                except Exception:
+                    dev = 0.0
+
+                # set metrics
+                try:
+                    g_duration.labels(**labels).set(dur)
+                    g_trades.labels(**labels).set(trades)
+                    g_dpt.labels(**labels).set(dpt)
+                    g_dev.labels(**labels).set(dev)
+                    total_set += 1
+                except Exception as e:
+                    # if labels don't match labelnames exactly this will error; print for debug
+                    print(f"Failed to set metrics for row in {fn}: {e}")
+                    # optionally print labels length and names:
+                    # print("labelnames:", g_duration._labelnames)
+                    # print("labels provided:", labels.keys())
+
+    if total_set > 0:
+        try:
+            push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+            print(f"Pushed {total_set} samples to Pushgateway job={JOB_NAME}")
+        except Exception as e:
+            print("Failed to push to gateway:", e)
+    else:
+        print("No metrics set; nothing pushed.")
+
+if __name__ == "__main__":
+    main()
