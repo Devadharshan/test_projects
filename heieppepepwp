@@ -1,0 +1,97 @@
+import os
+import pandas as pd
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+from datetime import datetime, timedelta, timezone
+
+# ----- CONFIG -----
+CSV_DIR = "C:\\path\\to\\csvs"   # <-- Update this path
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "bp_avg_duration_per_trade_job"
+IST = timezone(timedelta(hours=5, minutes=30))
+
+# ----- TIME WINDOWS -----
+WINDOWS = {
+    "today": 0,
+    "yesterday": 1,
+    "last7days": 7,
+    "last30days": 30
+}
+
+# ----- Parse Date from Filename -----
+def parse_date_from_filename(filename):
+    try:
+        date_str = filename.split("__")[-1].split(".csv")[0]
+        return datetime.strptime(date_str, "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+# ----- Get CSV Files for Given Window -----
+def get_csv_files_within_days(base_dir, days):
+    cutoff = datetime.now(IST).date() - timedelta(days=days)
+    files = []
+    for f in os.listdir(base_dir):
+        if f.endswith(".csv") and "_summary" not in f:
+            date = parse_date_from_filename(f)
+            if date and date >= cutoff:
+                files.append((os.path.join(base_dir, f), date))
+    return files
+
+# ----- Main Push Logic -----
+def push_metrics():
+    registry = CollectorRegistry()
+
+    # New Gauge: Average Duration per Trade per BP + Job
+    avg_duration_per_trade_job = Gauge(
+        "bp_avg_duration_per_trade_job",
+        "Average duration per trade for each BP and Job",
+        ["bp_name", "job_details", "window", "file_date"],
+        registry=registry
+    )
+
+    for window_name, window_days in WINDOWS.items():
+        files = get_csv_files_within_days(CSV_DIR, window_days)
+        if not files:
+            print(f"No CSV files found for window {window_name}")
+            continue
+
+        for file_path, file_date in files:
+            try:
+                df = pd.read_csv(file_path)
+
+                # Normalize columns
+                df.columns = [c.strip().upper() for c in df.columns]
+
+                # Required columns
+                required = ["BP NAME", "JOB DETAILS", "DURATIONPERTRADE"]
+                if not all(col in df.columns for col in required):
+                    print(f"❌ Missing required columns in {file_path}")
+                    continue
+
+                # Convert duration per trade to numeric
+                df["DURATIONPERTRADE"] = pd.to_numeric(df["DURATIONPERTRADE"], errors="coerce").fillna(0)
+
+                # Group by BP + JobDetails
+                grouped = df.groupby(["BP NAME", "JOB DETAILS"]).agg(
+                    avg_duration_per_trade=("DURATIONPERTRADE", "mean")
+                ).reset_index()
+
+                # Push to Pushgateway
+                for _, row in grouped.iterrows():
+                    bp = row["BP NAME"]
+                    job = row["JOB DETAILS"]
+                    avg_val = row["avg_duration_per_trade"]
+
+                    avg_duration_per_trade_job.labels(
+                        bp, job, window_name, str(file_date)
+                    ).set(avg_val)
+
+            except Exception as e:
+                print(f"⚠️ Error processing {file_path}: {e}")
+
+    # Push all metrics
+    push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+    print("✅ Metrics pushed successfully to Pushgateway!")
+
+# ----- Run -----
+if __name__ == "__main__":
+    push_metrics()
