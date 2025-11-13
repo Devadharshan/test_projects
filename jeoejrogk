@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+import os
+import pandas as pd
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+from datetime import datetime, timedelta, timezone
+
+# ---------------- CONFIG ----------------
+CSV_DIR = r"C:\path\to\csvs"  # <-- your CSV folder
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "bp_trade_metrics"
+IST = timezone(timedelta(hours=5, minutes=30))
+
+WINDOWS = {
+    "today": 0,
+    "yesterday": 1,
+    "last7days": 7,
+    "last30days": 30
+}
+
+# ---------------- HELPERS ----------------
+def parse_date_from_filename(filename):
+    try:
+        date_str = filename.split("__")[-1].split(".csv")[0]
+        return datetime.strptime(date_str, "%Y-%m-%d").date()
+    except:
+        return None
+
+def get_csv_files(base_dir):
+    files = []
+    for f in os.listdir(base_dir):
+        if f.lower().endswith(".csv") and "_summary" not in f.lower():
+            file_date = parse_date_from_filename(f)
+            if file_date:
+                files.append((os.path.join(base_dir, f), file_date))
+    return sorted(files)
+
+def determine_windows(file_date, today_date):
+    windows = []
+    if file_date == today_date:
+        windows.append("today")
+    if file_date == today_date - timedelta(days=1):
+        windows.append("yesterday")
+    if today_date - timedelta(days=6) <= file_date <= today_date:
+        windows.append("last7days")
+    if today_date - timedelta(days=29) <= file_date <= today_date:
+        windows.append("last30days")
+    return windows
+
+# ---------------- MAIN ----------------
+def push_bp_metrics():
+    today_date = datetime.now(IST).date()
+    registry = CollectorRegistry()
+
+    # Gauges
+    avg_duration_per_trade_gauge = Gauge(
+        "bp_avg_duration_per_trade_job",
+        "Average DurationPerTrade per BP and JobDetails",
+        ["bp_name", "jobdetails", "window", "file_date", "thread_id", "job_id", "duration", "no_of_trades", "start_time", "end_time"],
+        registry=registry
+    )
+    total_trades_gauge = Gauge(
+        "bp_total_trades_job",
+        "Total number of trades per BP and JobDetails",
+        ["bp_name", "jobdetails", "window", "file_date", "thread_id", "job_id", "duration", "no_of_trades", "start_time", "end_time"],
+        registry=registry
+    )
+
+    csv_files = get_csv_files(CSV_DIR)
+    if not csv_files:
+        print("No CSV files found.")
+        return
+
+    for file_path, file_date in csv_files:
+        try:
+            df = pd.read_csv(file_path)
+            df.columns = [c.strip().upper() for c in df.columns]
+
+            required_cols = ["BP NAME", "THREAD ID", "JOB ID", "START TIME", "END TIME", "DURATION", "NO OF TRADES", "DURATIONPERTRADE", "JOBDETAILS"]
+            if not all(col in df.columns for col in required_cols):
+                print(f"Missing required columns in {file_path}, skipping.")
+                continue
+
+            # Ensure numeric columns
+            df["DURATION"] = pd.to_numeric(df["DURATION"], errors="coerce").fillna(0)
+            df["NO OF TRADES"] = pd.to_numeric(df["NO OF TRADES"], errors="coerce").fillna(0)
+            df["DURATIONPERTRADE"] = pd.to_numeric(df["DURATIONPERTRADE"], errors="coerce").fillna(0)
+
+            windows = determine_windows(file_date, today_date)
+
+            # Push metrics per row
+            for _, row in df.iterrows():
+                labels = {
+                    "bp_name": str(row["BP NAME"]),
+                    "jobdetails": str(row["JOBDETAILS"]),
+                    "file_date": str(file_date),
+                    "window": ",".join(windows) if windows else "none",
+                    "thread_id": str(row["THREAD ID"]),
+                    "job_id": str(row["JOB ID"]),
+                    "duration": str(row["DURATION"]),
+                    "no_of_trades": str(row["NO OF TRADES"]),
+                    "start_time": str(row["START TIME"]),
+                    "end_time": str(row["END TIME"])
+                }
+
+                # Set gauges
+                avg_duration_per_trade_gauge.labels(**labels).set(row["DURATIONPERTRADE"])
+                total_trades_gauge.labels(**labels).set(row["NO OF TRADES"])
+
+        except Exception as e:
+            print(f"Error processing {file_path}: {e}")
+
+    push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+    print("✅ Metrics pushed successfully!")
+
+if __name__ == "__main__":
+    push_bp_metrics()
