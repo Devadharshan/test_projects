@@ -1,0 +1,53 @@
+{
+  "id": 1,
+  "title": "BP DurationPerTrade vs Total Trades",
+  "type": "timeseries",
+  "datasource": "Prometheus",
+  "targets": [
+    {
+      "expr": "avg(bp_avg_duration_per_trade_job) by (bp_name, job_details, window, file_date)",
+      "legendFormat": "{{bp_name}} - {{job_details}} - {{window}}",
+      "refId": "A",
+      "interval": "",
+      "format": "time_series"
+    },
+    {
+      "expr": "sum(bp_total_trades_job) by (bp_name, job_details, window, file_date)",
+      "legendFormat": "{{bp_name}} - {{job_details}} - {{window}}",
+      "refId": "B",
+      "interval": "",
+      "format": "time_series",
+      "yaxis": "right"
+    }
+  ],
+  "fieldConfig": {
+    "defaults": {
+      "unit": "s",
+      "custom": {},
+      "mappings": [],
+      "thresholds": {
+        "mode": "absolute",
+        "steps": [
+          {"color": "green", "value": null},
+          {"color": "red", "value": 1000}
+        ]
+      }
+    },
+    "overrides": [
+      {
+        "matcher": {"id": "byName", "options": "B"},
+        "properties": [
+          {"id": "unit", "value": "short"},
+          {"id": "axisPlacement", "value": "right"}
+        ]
+      }
+    ]
+  },
+  "options": {
+    "legend": {"displayMode": "list", "placement": "bottom"},
+    "tooltip": {"mode": "all"},
+    "showPoints": "auto",
+    "lineWidth": 2,
+    "pointSize": 4
+  }
+}
