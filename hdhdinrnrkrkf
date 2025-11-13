@@ -1,0 +1,66 @@
+import pandas as pd
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# ==== CONFIG ====
+CSV_FILE = "bp_data.csv"    # your non-summary CSV file
+PUSHGATEWAY = "http://localhost:9091"
+JOB_NAME = "bp_trade_metrics"
+
+# ==== READ CSV ====
+df = pd.read_csv(CSV_FILE)
+
+# Ensure required columns exist
+required_cols = ['bp_name', 'job_details', 'duration']
+missing = [col for col in required_cols if col not in df.columns]
+if missing:
+    raise ValueError(f"Missing required columns in CSV: {missing}")
+
+# ==== CREATE REGISTRY ====
+registry = CollectorRegistry()
+
+# ==== DEFINE GAUGES ====
+gauge_trade_duration = Gauge(
+    'bp_trade_duration_seconds',
+    'Duration of each trade per BP',
+    ['bp_name', 'job_details'],
+    registry=registry
+)
+
+gauge_avg_bp = Gauge(
+    'bp_avg_duration_per_trade',
+    'Average duration per BP',
+    ['bp_name'],
+    registry=registry
+)
+
+gauge_avg_bp_job = Gauge(
+    'bp_avg_duration_per_trade_job',
+    'Average duration per BP and Job',
+    ['bp_name', 'job_details'],
+    registry=registry
+)
+
+# ==== POPULATE METRICS ====
+# 1️⃣ Individual trade durations
+for _, row in df.iterrows():
+    gauge_trade_duration.labels(
+        bp_name=row['bp_name'],
+        job_details=row['job_details']
+    ).set(row['duration'])
+
+# 2️⃣ Average duration per BP
+avg_bp = df.groupby('bp_name')['duration'].mean().reset_index()
+for _, row in avg_bp.iterrows():
+    gauge_avg_bp.labels(bp_name=row['bp_name']).set(row['duration'])
+
+# 3️⃣ Average duration per BP + Job
+avg_bp_job = df.groupby(['bp_name', 'job_details'])['duration'].mean().reset_index()
+for _, row in avg_bp_job.iterrows():
+    gauge_avg_bp_job.labels(
+        bp_name=row['bp_name'],
+        job_details=row['job_details']
+    ).set(row['duration'])
+
+# ==== PUSH TO GATEWAY ====
+push_to_gateway(PUSHGATEWAY, job=JOB_NAME, registry=registry)
+print(f"✅ Metrics pushed successfully to {PUSHGATEWAY} under job '{JOB_NAME}'")
