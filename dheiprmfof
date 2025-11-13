@@ -1,0 +1,114 @@
+import os
+import pandas as pd
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# ==== CONFIG ====
+CSV_DIR = "C:\\path\\to\\csvs"   # path to your folder with CSVs
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "bp_trade_metrics"
+
+# ==== LOAD ALL CSV FILES ====
+dataframes = []
+for file in os.listdir(CSV_DIR):
+    if file.endswith(".csv"):
+        full_path = os.path.join(CSV_DIR, file)
+        print(f"📂 Reading {full_path}")
+        df = pd.read_csv(full_path)
+
+        # Normalize all column names (remove spaces, lowercase)
+        df.columns = df.columns.str.strip().str.lower()
+
+        # Standardize expected column names
+        rename_map = {
+            'bp name': 'bp_name',
+            'bpname': 'bp_name',
+            'job details': 'job_details',
+            'jobdetails': 'job_details',
+            'duration': 'duration',
+            'no of trades': 'no_of_trades',
+            'no_of_trades': 'no_of_trades',
+            'created at': 'created_at',
+            'completed at': 'completed_at',
+            'status': 'status'
+        }
+        df = df.rename(columns=rename_map)
+
+        dataframes.append(df)
+
+if not dataframes:
+    raise ValueError(f"No CSV files found in directory: {CSV_DIR}")
+
+df = pd.concat(dataframes, ignore_index=True)
+print(f"✅ Loaded {len(df)} rows from {len(dataframes)} CSV files")
+
+# ==== VERIFY REQUIRED COLUMNS ====
+required = ["bp_name", "job_details", "duration"]
+missing = [col for col in required if col not in df.columns]
+if missing:
+    raise ValueError(f"❌ Missing required columns after normalization: {missing}")
+
+# ==== PROMETHEUS REGISTRY ====
+registry = CollectorRegistry()
+
+# ==== DEFINE GAUGES ====
+gauge_trade_duration = Gauge(
+    "bp_trade_duration_seconds",
+    "Duration of each trade per BP and job",
+    ["bp_name", "job_details"],
+    registry=registry
+)
+
+gauge_avg_bp = Gauge(
+    "bp_avg_duration_per_trade",
+    "Average duration per BP",
+    ["bp_name"],
+    registry=registry
+)
+
+gauge_avg_bp_job = Gauge(
+    "bp_avg_duration_per_trade_job",
+    "Average duration per BP and job",
+    ["bp_name", "job_details"],
+    registry=registry
+)
+
+gauge_trade_count = Gauge(
+    "bp_trade_count",
+    "Number of trades processed per BP",
+    ["bp_name"],
+    registry=registry
+)
+
+# ==== POPULATE GAUGES ====
+
+# Convert numeric safely
+df["duration"] = pd.to_numeric(df["duration"], errors="coerce").fillna(0)
+
+# 1️⃣ Each trade duration (for raw data)
+for _, row in df.iterrows():
+    gauge_trade_duration.labels(
+        bp_name=row["bp_name"],
+        job_details=row["job_details"]
+    ).set(row["duration"])
+
+# 2️⃣ Average duration per BP
+avg_bp = df.groupby("bp_name")["duration"].mean().reset_index()
+for _, row in avg_bp.iterrows():
+    gauge_avg_bp.labels(bp_name=row["bp_name"]).set(row["duration"])
+
+# 3️⃣ Average duration per BP + Job
+avg_bp_job = df.groupby(["bp_name", "job_details"])["duration"].mean().reset_index()
+for _, row in avg_bp_job.iterrows():
+    gauge_avg_bp_job.labels(
+        bp_name=row["bp_name"],
+        job_details=row["job_details"]
+    ).set(row["duration"])
+
+# 4️⃣ Trade count per BP
+count_bp = df.groupby("bp_name")["duration"].count().reset_index(name="trade_count")
+for _, row in count_bp.iterrows():
+    gauge_trade_count.labels(bp_name=row["bp_name"]).set(row["trade_count"])
+
+# ==== PUSH TO GATEWAY ====
+push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+print(f"✅ Metrics pushed successfully to {PUSHGATEWAY_URL} under job '{JOB_NAME}'")
