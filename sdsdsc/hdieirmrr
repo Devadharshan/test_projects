@@ -1,0 +1,119 @@
+import os
+import pandas as pd
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+from datetime import datetime, timedelta, timezone
+import re
+
+# ----- CONFIG -----
+CSV_DIR = r"C:\bpmetrics\data"  # change this path
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "bp_detailed_insights_all_labels"
+IST = timezone(timedelta(hours=5, minutes=30))
+
+WINDOWS = {
+    "today": 0,
+    "yesterday": 1,
+    "last7days": 7,
+    "last30days": 30
+}
+
+# Utility: Parse date from filename like FocusBP_ProdLon_x64__2025-11-11.csv
+def parse_date_from_filename(filename):
+    m = re.findall(r"(\d{4}-\d{2}-\d{2})", filename)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m[-1], "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+# Utility: Clean label key/value for Prometheus compatibility
+def clean_label_key(k):
+    s = str(k).strip().lower()
+    s = re.sub(r'[^a-z0-9_]', '_', s)
+    if not re.match(r'^[a-z]', s):
+        s = "k_" + s
+    return s
+
+def clean_label_value(v):
+    s = str(v).strip()
+    return re.sub(r'[^A-Za-z0-9_:./@-]', '_', s) if s else "unknown"
+
+def get_csv_files_within_days(base_dir, days):
+    cutoff = datetime.now(IST).date() - timedelta(days=days)
+    files = []
+    for f in os.listdir(base_dir):
+        if f.lower().endswith(".csv") and "_summary" not in f.lower():
+            date = parse_date_from_filename(f)
+            if date and date >= cutoff:
+                files.append((os.path.join(base_dir, f), date))
+    return files
+
+def push_metrics():
+    registry = CollectorRegistry()
+
+    # Define gauges
+    duration_gauge = Gauge("bp_job_duration_seconds", "Job Duration", [], registry=registry)
+    trades_gauge = Gauge("bp_job_trades_count", "Number of trades per job", [], registry=registry)
+    duration_per_trade_gauge = Gauge("bp_job_duration_per_trade_seconds", "Duration per trade per job", [], registry=registry)
+    deviation_gauge = Gauge("bp_job_duration_deviation", "Deviation from BP average (%)", [], registry=registry)
+
+    for window_name, window_days in WINDOWS.items():
+        files = get_csv_files_within_days(CSV_DIR, window_days)
+        if not files:
+            continue
+
+        for file_path, file_date in files:
+            try:
+                df = pd.read_csv(file_path)
+                df.columns = [c.strip() for c in df.columns]
+
+                # Standardize column casing
+                df.columns = [c.strip() for c in df.columns]
+                upper_cols = [c.upper() for c in df.columns]
+                df.columns = upper_cols
+
+                # Required numeric fields
+                for col in ["DURATION", "NO OF TRADES", "DURATIONPERTRADE"]:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+                    else:
+                        df[col] = 0.0
+
+                # Compute BP-level average for deviation
+                if "BP NAME" in df.columns:
+                    bp_avg = df.groupby("BP NAME")["DURATION"].mean().to_dict()
+                else:
+                    bp_avg = {}
+
+                for _, row in df.iterrows():
+                    bp_name = row.get("BP NAME", "unknown")
+                    deviation = 0.0
+                    if bp_name in bp_avg and bp_avg[bp_name] > 0:
+                        deviation = ((row["DURATION"] - bp_avg[bp_name]) / bp_avg[bp_name]) * 100
+
+                    # All columns as labels (except numeric ones)
+                    labels = {}
+                    for col in df.columns:
+                        if col in ["DURATION", "NO OF TRADES", "DURATIONPERTRADE"]:
+                            continue
+                        val = row.get(col, "")
+                        labels[clean_label_key(col)] = clean_label_value(val)
+
+                    labels["window"] = window_name
+                    labels["file_date"] = str(file_date)
+
+                    # Push each metric with full labels
+                    duration_gauge.labels(**labels).set(row["DURATION"])
+                    trades_gauge.labels(**labels).set(row["NO OF TRADES"])
+                    duration_per_trade_gauge.labels(**labels).set(row["DURATIONPERTRADE"])
+                    deviation_gauge.labels(**labels).set(deviation)
+
+            except Exception as e:
+                print(f"Error processing {file_path}: {e}")
+
+    push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+    print(f"✅ Detailed metrics with ALL labels pushed for job {JOB_NAME}")
+
+if __name__ == "__main__":
+    push_metrics()
