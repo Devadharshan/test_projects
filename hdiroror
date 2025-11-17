@@ -1,0 +1,32 @@
+filebeat.inputs:
+  - type: log
+    enabled: true
+    paths:
+      - "C:\\path\\to\\your\\logfile.log"
+    fields:
+      service: logconverter
+    fields_under_root: true
+
+    processors:
+      # Step 1: Split fields using | separator
+      - dissect:
+          tokenizer: "%{date}|%{time}|%{pid}|%{thread}|%{}|%{component}|%{log_message}"
+          field: "message"
+          target_prefix: ""
+
+      # Step 2: Extract the processed number if present
+      - grok:
+          field: "log_message"
+          patterns:
+            - "No of messages processed:%{NUMBER:processed:int}"
+          ignore_failure: true
+
+      # Step 3: (Optional) Drop non-processed lines to reduce noise
+      - drop_event:
+          when:
+            not:
+              has_fields: ["processed"]
+
+output.elasticsearch:
+  hosts: ["http://localhost:9200"]
+  index: "filebeat-processed-%{+yyyy.MM.dd}"
