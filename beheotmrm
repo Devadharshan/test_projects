@@ -1,0 +1,121 @@
+import os
+import pandas as pd
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+from datetime import datetime, timedelta, timezone
+
+# ---------------- CONFIG ----------------
+CSV_DIR = r"C:\path\to\csvs"
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "bp_aggregated_all"
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+WINDOWS = {
+    "today": 0,
+    "yesterday": 1,
+    "last7days": 7,
+    "last30days": 30
+}
+
+# ---------------- HELPERS ----------------
+def parse_date_from_filename(filename):
+    try:
+        return datetime.strptime(filename.split("__")[-1].split(".csv")[0], "%Y-%m-%d").date()
+    except:
+        return None
+
+def get_csv_files_within_days(base_dir, days):
+    cutoff = datetime.now(IST).date() - timedelta(days=days)
+    result = []
+    for f in os.listdir(base_dir):
+        if f.endswith(".csv") and "_summary" not in f:
+            file_date = parse_date_from_filename(f)
+            if file_date and file_date >= cutoff:
+                result.append((os.path.join(base_dir, f), file_date))
+    return result
+
+# ---------------- MAIN ----------------
+def push_metrics():
+    registry = CollectorRegistry()
+
+    # BP-level gauges
+    g_total_trades = Gauge("bp_total_trades", "Total trades per BP",
+                           ["bp_name", "window", "file_date"], registry=registry)
+    g_total_duration = Gauge("bp_total_duration", "Total duration per BP",
+                             ["bp_name", "window", "file_date"], registry=registry)
+    g_avg_duration = Gauge("bp_avg_duration", "Average duration per BP",
+                           ["bp_name", "window", "file_date"], registry=registry)
+    g_avg_duration_per_trade = Gauge("bp_avg_duration_per_trade", "Average duration per trade per BP",
+                                     ["bp_name", "window", "file_date", "no_of_trades"], registry=registry)
+
+    # BP + Job-level gauges
+    g_job_total_trades = Gauge("bp_job_total_trades", "Total trades per BP + JobDetails",
+                               ["bp_name", "job_details", "window", "file_date"], registry=registry)
+    g_job_avg_duration_per_trade = Gauge("bp_job_avg_duration_per_trade",
+                                         "Avg duration per trade per BP + JobDetails (simple mean)",
+                                         ["bp_name", "job_details", "window", "file_date", "no_of_trades"],
+                                         registry=registry)
+
+    # ---------------- PROCESS WINDOWS ----------------
+    for window_name, window_days in WINDOWS.items():
+        files = get_csv_files_within_days(CSV_DIR, window_days)
+        if not files:
+            continue
+
+        for file_path, file_date in files:
+            try:
+                df = pd.read_csv(file_path)
+                df.columns = [c.strip().upper() for c in df.columns]
+
+                required_cols = ["BP NAME", "JOBDETAILS", "DURATION", "NO OF TRADES", "DURATIONPERTRADE"]
+                if not all(col in df.columns for col in required_cols):
+                    print("Missing required columns in:", file_path)
+                    continue
+
+                # Ensure numeric
+                df["DURATION"] = pd.to_numeric(df["DURATION"], errors="coerce").fillna(0)
+                df["NO OF TRADES"] = pd.to_numeric(df["NO OF TRADES"], errors="coerce").fillna(0)
+                df["DURATIONPERTRADE"] = pd.to_numeric(df["DURATIONPERTRADE"], errors="coerce").fillna(0)
+
+                # ---------------- BP-LEVEL ----------------
+                bp_group = df.groupby("BP NAME").agg(
+                    total_trades=("NO OF TRADES", "sum"),
+                    total_duration=("DURATION", "sum"),
+                    avg_duration=("DURATION", "mean")
+                ).reset_index()
+                bp_group["avg_duration_per_trade"] = bp_group["total_duration"] / bp_group["total_trades"].replace(0, 1)
+
+                for _, row in bp_group.iterrows():
+                    bp = row["BP NAME"]
+                    total_trades_val = int(row["total_trades"])
+                    g_total_trades.labels(bp, window_name, str(file_date)).set(total_trades_val)
+                    g_total_duration.labels(bp, window_name, str(file_date)).set(row["total_duration"])
+                    g_avg_duration.labels(bp, window_name, str(file_date)).set(row["avg_duration"])
+                    g_avg_duration_per_trade.labels(bp, window_name, str(file_date), str(total_trades_val)).set(
+                        row["avg_duration_per_trade"]
+                    )
+
+                # ---------------- BP + JOB ----------------
+                job_group = df.groupby(["BP NAME", "JOBDETAILS"]).agg(
+                    total_trades=("NO OF TRADES", "sum"),
+                    avg_duration_per_trade=("DURATIONPERTRADE", "mean")
+                ).reset_index()
+
+                for _, row in job_group.iterrows():
+                    bp = row["BP NAME"]
+                    job = row["JOBDETAILS"]
+                    total_trades_val = int(row["total_trades"])
+                    g_job_total_trades.labels(bp, job, window_name, str(file_date)).set(total_trades_val)
+                    g_job_avg_duration_per_trade.labels(bp, job, window_name, str(file_date), str(total_trades_val)).set(
+                        row["avg_duration_per_trade"]
+                    )
+
+            except Exception as e:
+                print("Error processing file:", file_path, e)
+
+    # ---------------- PUSH ----------------
+    push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+    print("✅ Metrics pushed successfully!")
+
+if __name__ == "__main__":
+    push_metrics()
