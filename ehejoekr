@@ -1,0 +1,35 @@
+[SERVICE]
+    Flush        1
+    Daemon       Off
+    Log_Level    info
+    Parsers_File parsers.conf
+
+###################################################
+# INPUT SECTION – READ LOG FILES
+###################################################
+[INPUT]
+    Name          tail
+    Path          C:\\Users\\deva\\Downloads\\logs\\*.log
+    Tag           mylogs
+    DB            C:\\Users\\deva\\Downloads\\logs\\fluentbit.db
+    Refresh_Interval 5
+    Skip_Long_Lines On
+
+###################################################
+# OUTPUT – SEND TO LOCAL ELASTICSEARCH
+###################################################
+[OUTPUT]
+    Name                  es
+    Match                 *
+    Host                  localhost
+    Port                  9200
+    Index                 windows-logs-%Y.%m.%d
+    Type                  _doc
+
+    # Authentication
+    HTTP_User             elastic
+    HTTP_Passwd           your_elastic_password
+
+    # SSL
+    tls                   On
+    tls.verify            Off
