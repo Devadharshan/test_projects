@@ -1,0 +1,104 @@
+import os
+import pandas as pd
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+from datetime import datetime, timedelta, timezone
+import re
+
+# ---------------- CONFIG ----------------
+CSV_DIR = r"C:\path\to\csvs"
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "bp_aggregated_summary"
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+WINDOWS = {
+    "today": 0,
+    "yesterday": 1,
+    "last7days": 7,
+    "last30days": 30
+}
+
+# ---------------- HELPERS ----------------
+def parse_date_from_filename(filename):
+    try:
+        date_str = filename.split("__")[-1].split(".csv")[0]
+        return datetime.strptime(date_str, "%Y-%m-%d").date()
+    except:
+        return None
+
+def normalize_label_name(name: str):
+    """Prometheus label names must match regex [a-zA-Z_][a-zA-Z0-9_]*"""
+    if not name:
+        return "unknown"
+    s = str(name).strip().lower()
+    s = re.sub(r'[^a-z0-9_]', '_', s)
+    if re.match(r'^\d', s):
+        s = "k_" + s
+    if s.startswith("__"):
+        s = "k_" + s
+    return s
+
+# ---------------- MAIN ----------------
+def push_metrics():
+    registry = CollectorRegistry()
+
+    # First, read a sample CSV to get all columns
+    sample_file = next((f for f in os.listdir(CSV_DIR) if f.endswith(".csv")), None)
+    if not sample_file:
+        print("No CSV files found")
+        return
+    df_sample = pd.read_csv(os.path.join(CSV_DIR, sample_file))
+    csv_columns = [normalize_label_name(c) for c in df_sample.columns]
+    all_labels = ["window", "file_date"] + csv_columns
+
+    # Create gauges with all labels
+    g_total_trades = Gauge("bp_total_trades", "Total trades per BP", all_labels, registry=registry)
+    g_avg_duration = Gauge("bp_avg_duration", "Average duration per BP", all_labels, registry=registry)
+    g_avg_duration_per_trade = Gauge("bp_avg_duration_per_trade", "Avg duration per trade per BP", all_labels, registry=registry)
+    
+    for window_name, window_days in WINDOWS.items():
+        cutoff = datetime.now(IST).date() - timedelta(days=window_days)
+        files = [f for f in os.listdir(CSV_DIR) if f.endswith(".csv") and parse_date_from_filename(f) >= cutoff]
+        for file in files:
+            file_path = os.path.join(CSV_DIR, file)
+            file_date = parse_date_from_filename(file)
+            try:
+                df = pd.read_csv(file_path)
+                df.columns = [normalize_label_name(c) for c in df.columns]
+
+                # Convert numeric columns
+                for col in ["duration", "no_of_trades", "durationpertrade"]:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+                # Aggregate by BP NAME
+                if "bp_name" not in df.columns or "no_of_trades" not in df.columns or "duration" not in df.columns:
+                    print(f"Missing required columns in {file_path}")
+                    continue
+
+                grouped = df.groupby("bp_name").agg(
+                    total_trades=("no_of_trades", "sum"),
+                    avg_duration=("duration", "mean")
+                ).reset_index()
+                grouped["avg_duration_per_trade"] = grouped["avg_duration"] / grouped["total_trades"].replace(0, 1)
+
+                # Push metrics
+                for _, row in grouped.iterrows():
+                    # prepare labels dict with all columns
+                    base_row = df[df["bp_name"] == row["bp_name"]].iloc[0].to_dict()
+                    labels = {normalize_label_name(k): str(v) for k, v in base_row.items()}
+                    labels["window"] = window_name
+                    labels["file_date"] = str(file_date)
+
+                    g_total_trades.labels(**labels).set(row["total_trades"])
+                    g_avg_duration.labels(**labels).set(row["avg_duration"])
+                    g_avg_duration_per_trade.labels(**labels).set(row["avg_duration_per_trade"])
+
+            except Exception as e:
+                print(f"Error processing {file_path}: {e}")
+
+    push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+    print("✅ Metrics pushed successfully!")
+
+if __name__ == "__main__":
+    push_metrics()
