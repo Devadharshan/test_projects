@@ -1,0 +1,31 @@
+[SERVICE]
+    Flush         1
+    Daemon        Off
+    Log_Level     info
+
+######################################################
+# INPUT: READ LOG FILES FROM CUSTOM PATH
+######################################################
+[INPUT]
+    Name              tail
+    Path              D:\\mylogs\\*.log
+    Tag               custom.logs
+    Refresh_Interval  5
+    Read_from_Head    True
+    DB                C:\\fluentbit\\customlogs.db
+
+######################################################
+# FILTER: PARSE LAST FIELD "No of messages processed:X"
+######################################################
+[FILTER]
+    Name        grep
+    Match       custom.logs
+    Regex       message   No of messages processed:
+
+######################################################
+# OUTPUT: SEND TO CONSOLE (FOR TESTING)
+######################################################
+[OUTPUT]
+    Name        stdout
+    Match       *
+    Format      json_lines
