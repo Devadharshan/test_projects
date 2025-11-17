@@ -1,0 +1,172 @@
+{
+  "title": "BP Operations Dashboard",
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "panels": [
+    {
+      "type": "gauge",
+      "title": "Total Trades",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "bp_total_trades",
+          "legendFormat": "Total Trades"
+        }
+      ],
+      "id": 1,
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"]
+        }
+      },
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 }
+    },
+    {
+      "type": "gauge",
+      "title": "Avg Duration Per Trade (ms)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "bp_avg_duration_per_trade",
+          "legendFormat": "Avg Duration"
+        }
+      ],
+      "id": 2,
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"]
+        }
+      },
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 }
+    },
+    {
+      "type": "gauge",
+      "title": "Total Duration (ms)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "bp_total_duration",
+          "legendFormat": "Total Duration"
+        }
+      ],
+      "id": 3,
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"]
+        }
+      },
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 }
+    },
+    {
+      "type": "gauge",
+      "title": "Success Rate (%)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "bp_success_rate",
+          "legendFormat": "Success %"
+        }
+      ],
+      "id": 4,
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"]
+        }
+      },
+      "gridPos": { "x": 0, "y": 4, "w": 6, "h": 4 }
+    },
+    {
+      "type": "gauge",
+      "title": "Total Errors",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "bp_total_errors",
+          "legendFormat": "Errors"
+        }
+      ],
+      "id": 5,
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"]
+        }
+      },
+      "gridPos": { "x": 6, "y": 4, "w": 6, "h": 4 }
+    },
+    {
+      "type": "table",
+      "title": "Trades Per BP",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "bp_job_total_trades",
+          "legendFormat": "{{bp_name}} - {{job_details}}"
+        }
+      ],
+      "id": 6,
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 6 },
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "type": "table",
+      "title": "Avg Duration Per BP (ms)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "bp_job_avg_duration",
+          "legendFormat": "{{bp_name}} - {{job_details}}"
+        }
+      ],
+      "id": 7,
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 6 },
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Duration & Trades Over Time",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "bp_avg_duration_per_trade",
+          "legendFormat": "Avg Duration"
+        },
+        {
+          "expr": "bp_total_trades",
+          "legendFormat": "Total Trades"
+        }
+      ],
+      "id": 8,
+      "gridPos": { "x": 0, "y": 14, "w": 24, "h": 8 }
+    }
+  ]
+}
