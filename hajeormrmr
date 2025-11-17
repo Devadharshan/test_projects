@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+import os
+import pandas as pd
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+from datetime import datetime, timedelta, timezone
+import re
+
+# ---------------- CONFIG ----------------
+CSV_DIR = r"C:\path\to\csvs"  # <-- your CSV folder
+PUSHGATEWAY_URL = "http://localhost:9091"
+
+JOB_BP_SUMMARY = "bp_summary"
+JOB_BP_JOB_SUMMARY = "bp_job_summary"
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+WINDOWS = {
+    "today": 0,
+    "yesterday": 1,
+    "last7days": 7,
+    "last30days": 30
+}
+
+# ---------------- HELPERS ----------------
+def parse_date_from_filename(filename):
+    try:
+        date_str = filename.split("__")[-1].split(".csv")[0]
+        return datetime.strptime(date_str, "%Y-%m-%d").date()
+    except:
+        return None
+
+def get_csv_files_within_days(base_dir, days):
+    cutoff = datetime.now(IST).date() - timedelta(days=days)
+    result = []
+    for f in os.listdir(base_dir):
+        if f.endswith(".csv") and os.path.isfile(os.path.join(base_dir, f)):
+            file_date = parse_date_from_filename(f)
+            if file_date and file_date >= cutoff:
+                result.append((os.path.join(base_dir, f), file_date))
+    return result
+
+def normalize_label_name(name: str):
+    if not name:
+        return "unknown"
+    s = str(name).strip().lower()
+    s = re.sub(r'[^a-z0-9_]', '_', s)
+    if re.match(r'^\d', s):
+        s = "k_" + s
+    # avoid reserved Prometheus labels
+    if s.startswith("__"):
+        s = "k_" + s
+    return s
+
+def safe_float(val):
+    try:
+        return float(val)
+    except:
+        return 0.0
+
+# ---------------- MAIN ----------------
+def push_metrics():
+    registry_bp = CollectorRegistry()
+    registry_job = CollectorRegistry()
+
+    # ---------------- GAUGES ----------------
+    # BP-level
+    g_total_trades = Gauge("bp_total_trades", "Total trades per BP",
+                           ["file_date", "window", "bp_name"], registry=registry_bp)
+    g_total_duration = Gauge("bp_total_duration", "Total duration per BP",
+                             ["file_date", "window", "bp_name"], registry=registry_bp)
+    g_avg_duration = Gauge("bp_avg_duration", "Average duration per BP",
+                           ["file_date", "window", "bp_name"], registry=registry_bp)
+    g_avg_duration_per_trade = Gauge("bp_avg_duration_per_trade", "Avg duration per trade per BP",
+                                     ["file_date", "window", "bp_name"], registry=registry_bp)
+
+    # BP + JobDetails level
+    g_job_total_trades = Gauge("bp_job_total_trades", "Total trades per BP + JobDetails",
+                               ["file_date", "window", "bp_name", "job_details"], registry=registry_job)
+    g_job_avg_duration_per_trade = Gauge("bp_job_avg_duration_per_trade",
+                                         "Avg duration per trade per BP + JobDetails",
+                                         ["file_date", "window", "bp_name", "job_details"], registry=registry_job)
+
+    # ---------------- PROCESS ----------------
+    for window_name, window_days in WINDOWS.items():
+        files = get_csv_files_within_days(CSV_DIR, window_days)
+        if not files:
+            continue
+
+        for file_path, file_date in files:
+            try:
+                df = pd.read_csv(file_path)
+
+                # Normalize columns
+                df.columns = [c.strip().upper().replace(" ", "_") for c in df.columns]
+
+                # Ensure required numeric columns exist
+                for col in ["DURATION", "NO_OF_TRADES", "DURATIONPERTRADE"]:
+                    if col not in df.columns:
+                        df[col] = 0.0
+                    else:
+                        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+                # Normalize BP_NAME and JOBDETAILS
+                if "BP_NAME" not in df.columns:
+                    df["BP_NAME"] = "unknown"
+                if "JOBDETAILS" not in df.columns:
+                    df["JOBDETAILS"] = "unknown"
+
+                # ---------------- BP AGGREGATION ----------------
+                bp_group = df.groupby("BP_NAME").agg(
+                    total_trades=("NO_OF_TRADES", "sum"),
+                    total_duration=("DURATION", "sum"),
+                    avg_duration=("DURATION", "mean")
+                ).reset_index()
+                bp_group["avg_duration_per_trade"] = bp_group["total_duration"] / bp_group["total_trades"].replace(0, 1)
+
+                for _, row in bp_group.iterrows():
+                    bp = row["BP_NAME"]
+                    g_total_trades.labels(str(file_date), window_name, bp).set(row["total_trades"])
+                    g_total_duration.labels(str(file_date), window_name, bp).set(row["total_duration"])
+                    g_avg_duration.labels(str(file_date), window_name, bp).set(row["avg_duration"])
+                    g_avg_duration_per_trade.labels(str(file_date), window_name, bp).set(row["avg_duration_per_trade"])
+
+                # ---------------- BP + JOBDETAILS AGGREGATION ----------------
+                job_group = df.groupby(["BP_NAME", "JOBDETAILS"]).agg(
+                    total_trades=("NO_OF_TRADES", "sum"),
+                    avg_duration_per_trade=("DURATIONPERTRADE", "mean")
+                ).reset_index()
+
+                for _, row in job_group.iterrows():
+                    bp = row["BP_NAME"]
+                    job = row["JOBDETAILS"]
+                    g_job_total_trades.labels(str(file_date), window_name, bp, job).set(row["total_trades"])
+                    g_job_avg_duration_per_trade.labels(str(file_date), window_name, bp, job).set(
+                        row["avg_duration_per_trade"]
+                    )
+
+            except Exception as e:
+                print(f"[ERROR] Processing file {file_path}: {e}")
+
+    # ---------------- PUSH ----------------
+    push_to_gateway(PUSHGATEWAY_URL, job=JOB_BP_SUMMARY, registry=registry_bp)
+    push_to_gateway(PUSHGATEWAY_URL, job=JOB_BP_JOB_SUMMARY, registry=registry_job)
+    print("✅ Metrics pushed successfully!")
+
+# ---------------- ENTRY ----------------
+if __name__ == "__main__":
+    push_metrics()
