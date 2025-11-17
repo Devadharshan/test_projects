@@ -1,0 +1,181 @@
+import os
+import pandas as pd
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+from datetime import datetime, timedelta, timezone
+
+# -----------------------------------------------------------
+# CONFIG
+# -----------------------------------------------------------
+CSV_DIR = r"C:\path\to\csvs"
+PUSHGATEWAY_URL = "http://localhost:9091"
+
+JOB_BP_SUMMARY = "bp_summary"
+JOB_BP_JOB_SUMMARY = "bp_job_summary"
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+WINDOWS = {
+    "today": 0,
+    "yesterday": 1,
+    "last7days": 7,
+    "last30days": 30
+}
+
+
+def parse_date_from_filename(filename):
+    try:
+        return datetime.strptime(filename.split("__")[-1].split(".csv")[0], "%Y-%m-%d").date()
+    except:
+        return None
+
+
+def get_csv_files_within_days(base_dir, days):
+    cutoff = datetime.now(IST).date() - timedelta(days=days)
+    result = []
+    for f in os.listdir(base_dir):
+        if f.endswith(".csv") and "_summary" not in f:
+            file_date = parse_date_from_filename(f)
+            if file_date and file_date >= cutoff:
+                result.append((os.path.join(base_dir, f), file_date))
+    return result
+
+
+def push_metrics():
+
+    # -----------------------------------------
+    # Load one CSV to extract ALL column labels
+    # -----------------------------------------
+    sample_files = [f for f in os.listdir(CSV_DIR) if f.endswith(".csv")]
+    if not sample_files:
+        print("❌ No CSV found.")
+        return
+
+    sample_df = pd.read_csv(os.path.join(CSV_DIR, sample_files[0]))
+    sample_df.columns = [c.strip().upper().replace(" ", "_") for c in sample_df.columns]
+
+    csv_labels = [col.lower() for col in sample_df.columns]
+    base_labels = ["window", "file_date"]
+
+    all_labels = base_labels + csv_labels
+    print("📌 Using labels:", all_labels)
+
+    # -----------------------------------------------------------
+    # REGISTRIES + GAUGES
+    # -----------------------------------------------------------
+    registry_bp = CollectorRegistry()
+    registry_job = CollectorRegistry()
+
+    # ----- BP level -----
+    g_total_trades = Gauge(
+        "bp_total_trades", "Total trades per BP",
+        all_labels, registry=registry_bp)
+
+    g_total_duration = Gauge(
+        "bp_total_duration", "Total duration per BP",
+        all_labels, registry=registry_bp)
+
+    g_avg_duration = Gauge(
+        "bp_avg_duration", "Average duration per BP",
+        all_labels, registry=registry_bp)
+
+    g_avg_duration_per_trade = Gauge(
+        "bp_avg_duration_per_trade", "Avg duration per trade per BP",
+        all_labels, registry=registry_bp)
+
+    # ----- BP + Job level -----
+    g_job_total_trades = Gauge(
+        "bp_job_total_trades", "Trades per BP+JobDetails",
+        all_labels, registry=registry_job)
+
+    g_job_avg_duration_per_trade = Gauge(
+        "bp_job_avg_duration_per_trade", "Simple avg duration per trade job",
+        all_labels, registry=registry_job)
+
+    g_job_weighted_avg_duration_per_trade = Gauge(
+        "bp_job_weighted_avg_duration_per_trade",
+        "Weighted avg duration per trade job",
+        all_labels, registry=registry_job)
+
+    # -----------------------------------------------------------
+    # MAIN PROCESS
+    # -----------------------------------------------------------
+    for window_name, window_days in WINDOWS.items():
+
+        files = get_csv_files_within_days(CSV_DIR, window_days)
+        if not files:
+            continue
+
+        for file_path, file_date in files:
+
+            df = pd.read_csv(file_path)
+            df.columns = [c.strip().upper().replace(" ", "_") for c in df.columns]
+
+            # Convert numeric fields but don't calculate new ones
+            df["DURATION"] = pd.to_numeric(df["DURATION"], errors="coerce").fillna(0)
+            df["NO_OF_TRADES"] = pd.to_numeric(df["NO_OF_TRADES"], errors="coerce").fillna(0)
+            df["DURATIONPERTRADE"] = pd.to_numeric(df["DURATIONPERTRADE"], errors="coerce").fillna(0)
+
+            # -------------------------------
+            # BP-level aggregation
+            # -------------------------------
+            bp_group = df.groupby("BP_NAME").agg(
+                total_trades=("NO_OF_TRADES", "sum"),
+                total_duration=("DURATION", "sum"),
+                avg_duration=("DURATION", "mean")
+            ).reset_index()
+
+            bp_group["avg_duration_per_trade"] = (
+                bp_group["total_duration"] 
+                / bp_group["total_trades"].replace(0, 1)
+            )
+
+            # PUSH BP metrics
+            for _, row in bp_group.iterrows():
+
+                labels = {"window": window_name, "file_date": str(file_date)}
+                # Add all CSV cols (empty string if missing)
+                for c in csv_labels:
+                    labels[c] = ""
+
+                labels["bp_name"] = row["BP_NAME"]
+
+                g_total_trades.labels(**labels).set(row["total_trades"])
+                g_total_duration.labels(**labels).set(row["total_duration"])
+                g_avg_duration.labels(**labels).set(row["avg_duration"])
+                g_avg_duration_per_trade.labels(**labels).set(row["avg_duration_per_trade"])
+
+            # -------------------------------
+            # BP + JobDetails aggregation
+            # -------------------------------
+            job_group = df.groupby(["BP_NAME", "JOBDETAILS"]).agg(
+                total_trades=("NO_OF_TRADES", "sum"),
+                simple_mean_duration_per_trade=("DURATIONPERTRADE", "mean"),
+                weighted_sum_duration=("DURATION", "sum"),
+                weighted_sum_trades=("NO_OF_TRADES", "sum"),
+            ).reset_index()
+
+            job_group["weighted_avg_duration_per_trade"] = (
+                job_group["weighted_sum_duration"] /
+                job_group["weighted_sum_trades"].replace(0, 1)
+            )
+
+            # PUSH JOB metrics
+            for _, row in job_group.iterrows():
+
+                labels = {"window": window_name, "file_date": str(file_date)}
+                for c in csv_labels:
+                    labels[c] = ""
+
+                labels["bp_name"] = row["BP_NAME"]
+                labels["jobdetails"] = row["JOBDETAILS"]
+
+                g_job_total_trades.labels(**labels).set(row["total_trades"])
+                g_job_avg_duration_per_trade.labels(**labels).set(
+                    row["simple_mean_duration_per_trade"])
+                g_job_weighted_avg_duration_per_trade.labels(**labels).set(
+                    row["weighted_avg_duration_per_trade"])
+
+    # PUSH to gateway
+    push_to_gateway(PUSHGATEWAY_URL, job=JOB_BP_SUMMARY, registry=registry_bp)
+    push_to_gateway(PUSHGATEWAY_URL, job=JOB_BP_JOB_SUMMARY, registry=registry_job)
+    print("✅ Metrics pushed successfully!")
