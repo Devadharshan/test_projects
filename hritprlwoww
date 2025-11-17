@@ -1,0 +1,134 @@
+import os
+import pandas as pd
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+from datetime import datetime, timedelta, timezone
+
+# -----------------------------------------------------------
+# CONFIG
+# -----------------------------------------------------------
+CSV_DIR = r"C:\path\to\csvs"
+PUSHGATEWAY_URL = "http://localhost:9091"
+
+JOB_BP_SUMMARY = "bp_summary"
+JOB_BP_JOB_SUMMARY = "bp_job_summary"
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+WINDOWS = {
+    "today": 0,
+    "yesterday": 1,
+    "last7days": 7,
+    "last30days": 30
+}
+
+
+# -----------------------------------------------------------
+# HELPERS
+# -----------------------------------------------------------
+def parse_date_from_filename(filename):
+    try:
+        return datetime.strptime(filename.split("__")[-1].split(".csv")[0], "%Y-%m-%d").date()
+    except:
+        return None
+
+
+def get_csv_files_within_days(base_dir, days):
+    cutoff = datetime.now(IST).date() - timedelta(days=days)
+    result = []
+
+    for f in os.listdir(base_dir):
+        if f.endswith(".csv") and "_summary" not in f:
+            file_date = parse_date_from_filename(f)
+            if file_date and file_date >= cutoff:
+                result.append((os.path.join(base_dir, f), file_date))
+    return result
+
+
+# -----------------------------------------------------------
+# MAIN
+# -----------------------------------------------------------
+def push_metrics():
+
+    # -----------------------------------------------------------
+    # STEP 1 — LOAD ONE CSV TO EXTRACT LABEL NAMES
+    # -----------------------------------------------------------
+    sample_files = [f for f in os.listdir(CSV_DIR) if f.endswith(".csv")]
+    if not sample_files:
+        print("❌ No CSV files found")
+        return
+
+    sample_df = pd.read_csv(os.path.join(CSV_DIR, sample_files[0]))
+    sample_df.columns = [c.strip().upper().replace(" ", "_") for c in sample_df.columns]
+
+    csv_labels = [col.lower() for col in sample_df.columns]
+    base_labels = ["window", "file_date"]
+
+    all_labels = base_labels + csv_labels
+
+    print("📌 Labels used:", all_labels)
+
+    # -----------------------------------------------------------
+    # STEP 2 — CREATE REGISTRIES & METRICS
+    # -----------------------------------------------------------
+    registry_bp = CollectorRegistry()
+    registry_job = CollectorRegistry()
+
+    bp_metric = Gauge(
+        "bp_row_info",
+        "Raw BP rows with all columns as labels",
+        all_labels,
+        registry=registry_bp
+    )
+
+    job_metric = Gauge(
+        "bp_job_row_info",
+        "Raw BP+JobDetails rows with all columns as labels",
+        all_labels,
+        registry=registry_job
+    )
+
+    # -----------------------------------------------------------
+    # STEP 3 — PROCESS EACH WINDOW & CSV
+    # -----------------------------------------------------------
+    for window_name, window_days in WINDOWS.items():
+
+        files = get_csv_files_within_days(CSV_DIR, window_days)
+        if not files:
+            continue
+
+        for file_path, file_date in files:
+
+            try:
+                df = pd.read_csv(file_path)
+                df.columns = [c.strip().upper().replace(" ", "_") for c in df.columns]
+
+                for _, row in df.iterrows():
+
+                    # Create label set
+                    labels = {
+                        "window": window_name,
+                        "file_date": str(file_date)
+                    }
+
+                    # Add CSV columns as labels
+                    for col in df.columns:
+                        labels[col.lower()] = str(row[col])
+
+                    # Send metric value = 1
+                    bp_metric.labels(**labels).set(1)
+                    job_metric.labels(**labels).set(1)
+
+            except Exception as e:
+                print("❌ Error in file:", file_path, e)
+
+    # -----------------------------------------------------------
+    # PUSH TO GATEWAY
+    # -----------------------------------------------------------
+    push_to_gateway(PUSHGATEWAY_URL, job=JOB_BP_SUMMARY, registry=registry_bp)
+    push_to_gateway(PUSHGATEWAY_URL, job=JOB_BP_JOB_SUMMARY, registry=registry_job)
+
+    print("✅ Done! All metrics pushed successfully.")
+
+
+if __name__ == "__main__":
+    push_metrics()
