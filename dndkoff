@@ -1,0 +1,41 @@
+filebeat.inputs:
+  - type: filestream
+    id: multi_logs
+    enabled: true
+
+    paths:
+      - "C:/logs/app1/*.log"
+      - "C:/logs/app2/*.txt"
+      - "D:/services/*/logs/*.log"
+      - "D:/external_logs/**/*.log"   # recursive
+
+    parsers:
+      - dissect:
+          tokenizer: "%{date}|%{time}|%{pid}|%{thread}|%{}|%{component}|%{log_message}"
+          field: "message"
+          target_prefix: ""
+
+      - grok:
+          field: "log_message"
+          patterns:
+            - "No of messages processed:%{NUMBER:processed:int}"
+          ignore_failure: true
+
+    # Helpful metadata
+    prospector.scanner.check_interval: 10s
+    parsers.decoding.fail_on_error: false
+
+processors:
+  - add_fields:
+      target: "log"
+      fields:
+        filename: "%{[log.file.path]}"
+
+output.elasticsearch:
+  hosts: ["http://localhost:9200"]
+  index: "filebeat-parsed-%{+yyyy.MM.dd}"
+
+# REQUIRED because index name is modified
+setup.template.name: "filebeat-parsed"
+setup.template.pattern: "filebeat-parsed-*"
+setup.template.enabled: true
