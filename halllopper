@@ -1,0 +1,371 @@
+#!/usr/bin/env python3
+"""
+push_bp_deep_insights.py
+
+- Reads all non-summary CSV files from CSV_DIR.
+- For each CSV row:
+    * pushes a raw-row gauge (bp_raw_row = 1) with ALL CSV columns (string or numeric) as labels
+    * pushes numeric gauges for numeric fields (duration_seconds, durationpertrade_seconds, no_of_trades, calculated_time_taken_seconds)
+- Aggregated gauges:
+    * bp_avg_durationpertrade_by_job (avg of DurationPerTrade) per BP+JobDetails
+    * bp_total_trades_job (sum of No of trades) per BP+JobDetails
+- Labels include file_date (from filename) and window (today/yesterday/last7days/last30days)
+- Uses a fresh CollectorRegistry per push to avoid duplicate-series errors.
+- Edit CSV_DIR and PUSHGATEWAY_URL before running.
+"""
+import os
+import re
+import math
+import pandas as pd
+from datetime import datetime, timedelta, timezone
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# ---------------- CONFIG ----------------
+CSV_DIR = r"C:\path\to\csvs"         # <-- update
+PUSHGATEWAY_URL = "http://localhost:9091"  # <-- update if needed
+
+# Prometheus job names (two separate jobs: raw rows + aggregated stats)
+JOB_RAW = "bp_deep_raw"
+JOB_STATS = "bp_deep_stats"
+
+# Timezone (IST)
+try:
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+except Exception:
+    IST = timezone(timedelta(hours=5, minutes=30))
+
+# Expected columns in the non-summary CSV (you confirmed these exactly)
+EXPECTED_COLS = [
+    "BP NAME", "Thread ID", "JOB ID", "Start Time", "End Time",
+    "Duration", "No of trades", "DurationPerTrade", "JobDetails"
+]
+
+# Windows considered
+WINDOWS = {
+    "today": 0,
+    "yesterday": 1,
+    "last7days": 7,
+    "last30days": 30
+}
+
+# ---------------- HELPERS ----------------
+def find_file_date_from_name(fname):
+    """Find last YYYY-MM-DD in filename. Return date object or None."""
+    m = re.findall(r"(\d{4}-\d{2}-\d{2})", fname)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m[-1], "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+def windows_for_date(file_date, today_date):
+    """Return list of windows the given file_date belongs to."""
+    if file_date is None:
+        return []
+    windows = []
+    if file_date == today_date:
+        windows.append("today")
+    if file_date == (today_date - timedelta(days=1)):
+        windows.append("yesterday")
+    if (today_date - timedelta(days=6)) <= file_date <= today_date:
+        windows.append("last7days")
+    if (today_date - timedelta(days=29)) <= file_date <= today_date:
+        windows.append("last30days")
+    return windows
+
+def safe_to_float(v):
+    if v is None:
+        return None
+    try:
+        s = str(v).strip()
+        if s == "":
+            return None
+        return float(s.replace(",", ""))
+    except Exception:
+        return None
+
+def clean_label(v):
+    """Turn arbitrary value into a safe Prometheus label value (string)."""
+    if v is None:
+        return "unknown"
+    s = str(v).strip()
+    if s == "":
+        return "unknown"
+    # replace characters that can break label values
+    return re.sub(r'[^A-Za-z0-9_\-.:/@]', '_', s)
+
+# ---------------- MAIN ----------------
+def push_all():
+    # determine today's date in IST
+    today_ist = datetime.now(IST).date()
+
+    # collect all non-summary CSV files in CSV_DIR
+    files = []
+    for f in sorted(os.listdir(CSV_DIR)):
+        if not f.lower().endswith(".csv"):
+            continue
+        if "_summary" in f.lower():
+            continue
+        full = os.path.join(CSV_DIR, f)
+        file_date = find_file_date_from_name(f)
+        files.append((full, f, file_date))
+
+    if not files:
+        print("No non-summary CSV files found in", CSV_DIR)
+        return
+
+    # We'll push RAW rows grouped by window to avoid duplicate label explosions.
+    # For each window, create a fresh registry and push all rows belonging to that window.
+    # Also create aggregated stats per window and push them separately to JOB_STATS.
+    # First, build a dataframe of all rows across files (to allow per-window grouping & aggregations).
+    all_rows = []
+    for full_path, fname, file_date in files:
+        try:
+            df = pd.read_csv(full_path, dtype=str)  # read as strings first
+        except Exception as e:
+            print(f"Skipping unreadable file {fname}: {e}")
+            continue
+
+        # normalize column names by exact expected names mapping (handle minor variants)
+        orig_cols = list(df.columns)
+        # Create mapping from existing to expected if variants exist (lower/space differences)
+        col_map = {}
+        lower_map = {c.strip().lower(): c for c in orig_cols}
+        # expected normalized keys
+        exp_norm = {k: k.strip().lower() for k in EXPECTED_COLS}
+
+        for exp in EXPECTED_COLS:
+            norm = exp.strip().lower()
+            if norm in lower_map:
+                col_map[lower_map[norm]] = exp  # map original col name -> canonical expected
+        # rename present columns
+        if col_map:
+            df = df.rename(columns=col_map)
+
+        # ensure all expected columns exist (if not, fill missing with empty)
+        for c in EXPECTED_COLS:
+            if c not in df.columns:
+                df[c] = ""
+
+        # attach file metadata
+        df["__file_name"] = fname
+        df["__file_date"] = file_date  # may be None
+        df["__windows"] = df["__file_date"].apply(lambda d: ",".join(windows_for_date(d, today_ist)) if d is not None else "")
+
+        # compute calculated time_taken (in seconds) from Start Time and End Time if possible
+        # Accepts formats like "11/11/2025 3:12" or common datetime strings
+        def compute_time_taken(row):
+            s = str(row.get("Start Time") or "").strip()
+            e = str(row.get("End Time") or "").strip()
+            if not s or not e:
+                return None
+            # try multiple parsers: dayfirst True because format examples are dd/mm/yyyy H:M
+            for dayfirst in (True, False):
+                try:
+                    start = pd.to_datetime(s, dayfirst=dayfirst, errors="coerce")
+                    end = pd.to_datetime(e, dayfirst=dayfirst, errors="coerce")
+                    if pd.isna(start) or pd.isna(end):
+                        continue
+                    delta = (end - start).total_seconds()
+                    if math.isfinite(delta):
+                        return delta
+                except Exception:
+                    continue
+            return None
+
+        df["__time_taken_seconds"] = df.apply(compute_time_taken, axis=1)
+
+        # keep original row values and append to all_rows
+        # convert to dicts to avoid pandas dtype issues later
+        for _, r in df.iterrows():
+            row = {c: (r[c] if c in r else "") for c in EXPECTED_COLS}
+            row["__file_name"] = r["__file_name"]
+            row["__file_date"] = r["__file_date"]
+            row["__windows"] = r["__windows"]
+            row["__time_taken_seconds"] = r["__time_taken_seconds"]
+            all_rows.append(row)
+
+    if not all_rows:
+        print("No valid rows collected from CSVs.")
+        return
+
+    # Convert to DataFrame for ease of grouping
+    all_df = pd.DataFrame(all_rows)
+
+    # Identify numeric columns we will push as numeric gauges
+    # We'll push numeric gauges for: Duration, No of trades, DurationPerTrade, __time_taken_seconds
+    numeric_cols = []
+    for c in ["Duration", "No of trades", "DurationPerTrade", "__time_taken_seconds"]:
+        if c in all_df.columns:
+            numeric_cols.append(c)
+
+    # Build set of string label columns to include in labels (exclude numeric ones)
+    label_cols = [c for c in EXPECTED_COLS if c not in numeric_cols]
+    # We'll always include file_date and window as labels
+    label_cols += ["__file_name", "__file_date", "__windows"]
+
+    # CLEAN label column order and canonical label names
+    # Map label keys to prometheus-safe label names
+    def to_label_name(col):
+        # remove spaces, lowercase, replace non-alphanum with _
+        name = col.strip().lower().replace(" ", "_")
+        name = re.sub(r'[^a-z0-9_]', '_', name)
+        # cannot start with digit; prefix if needed
+        if re.match(r'^[0-9]', name):
+            name = "k_" + name
+        return name
+
+    label_key_map = {col: to_label_name(col) for col in label_cols}
+
+    # ---------------- PUSH RAW ROWS (per window) ----------------
+    # For each window, filter rows that belong to that window and push gauges.
+    # Use fresh CollectorRegistry per window & per push to avoid duplicate time series errors.
+    windows_list = ["today", "yesterday", "last7days", "last30days", ""]  # include rows with no window (file_date missing)
+    for win in windows_list:
+        window_filter = (all_df["__windows"].str.contains(win)) if win else (all_df["__windows"] == "")
+        subset = all_df[window_filter].copy()
+        if subset.empty:
+            # nothing for this window
+            continue
+
+        # create registry for raw push
+        reg = CollectorRegistry()
+
+        # 1) bp_raw_row: a presence gauge with value 1 and all columns as labels (stringified)
+        bp_raw_labels = [label_key_map[c] for c in label_cols]
+        raw_metric = Gauge("bp_raw_row", "Raw CSV row (presence) with all columns as labels", bp_raw_labels, registry=reg)
+
+        # 2) numeric gauges per numeric column: metric names constructed
+        numeric_gauges = {}
+        for nc in numeric_cols:
+            # metric name: normalized
+            nm = "bp_raw_" + re.sub(r'[^a-z0-9_]', '_', nc.strip().lower())
+            if "duration" in nc.lower() and not nm.endswith("_seconds"):
+                nm = nm + "_seconds"
+            g = Gauge(nm, f"Raw numeric field {nc}", bp_raw_labels, registry=reg)
+            numeric_gauges[nc] = g
+
+        # push rows
+        set_count = 0
+        for _, r in subset.iterrows():
+            # build label values in the same order as bp_raw_labels
+            label_values = []
+            for orig_col in label_cols:
+                v = r.get(orig_col)
+                # for file_date keep YYYY-MM-DD or empty
+                if orig_col == "__file_date" and isinstance(v, (datetime,)):
+                    v = v.date().isoformat()
+                label_values.append(clean_label(v))
+
+            try:
+                raw_metric.labels(*label_values).set(1.0)
+                set_count += 1
+            except Exception as e:
+                print(f"[RAW] Failed to set bp_raw_row for labels={label_values}: {e}")
+                continue
+
+            # set numeric gauges for this row (if present)
+            for nc, g in numeric_gauges.items():
+                val = r.get(nc)
+                vnum = safe_to_float(val)
+                if vnum is None:
+                    vnum = 0.0
+                try:
+                    g.labels(*label_values).set(vnum)
+                except Exception as e:
+                    print(f"[RAW] Failed numeric gauge {nc} for labels={label_values}: {e}")
+
+        # push registry for this window
+        try:
+            push_to_gateway(PUSHGATEWAY_URL, job=JOB_RAW + (f"_{win}" if win else "_none"), registry=reg)
+            print(f"Pushed RAW rows for window='{win}' -> job={JOB_RAW + (f'_{win}' if win else '_none')} (rows={set_count})")
+        except Exception as e:
+            print(f"Failed push RAW for window {win}: {e}")
+
+    # ---------------- AGGREGATED STATS (per window) ----------------
+    # We'll compute two aggregated metrics per window:
+    # - bp_avg_durationpertrade_by_job: avg(DurationPerTrade) per BP NAME + JobDetails
+    # - bp_total_trades_job: sum(No of trades) per BP NAME + JobDetails
+    for win in windows_list:
+        window_filter = (all_df["__windows"].str.contains(win)) if win else (all_df["__windows"] == "")
+        subset = all_df[window_filter].copy()
+        if subset.empty:
+            continue
+
+        # ensure numeric columns exist and are numeric
+        if "DurationPerTrade" in subset.columns:
+            subset["DurationPerTrade_num"] = subset["DurationPerTrade"].apply(safe_to_float).fillna(0.0)
+        else:
+            subset["DurationPerTrade_num"] = 0.0
+        if "No of trades" in subset.columns:
+            subset["No_of_trades_num"] = subset["No of trades"].apply(safe_to_float).fillna(0.0)
+        else:
+            subset["No_of_trades_num"] = 0.0
+
+        # group by BP NAME + JobDetails
+        grouped = subset.groupby(["BP NAME", "JobDetails"]).agg(
+            avg_durationpertrade=("DurationPerTrade_num", "mean"),
+            total_trades=("No_of_trades_num", "sum")
+        ).reset_index()
+
+        if grouped.empty:
+            continue
+
+        # use fresh registry
+        reg = CollectorRegistry()
+        gauge_avg = Gauge(
+            "bp_avg_durationpertrade_by_job",
+            "Average DurationPerTrade per BP + JobDetails",
+            ["bp_name", "jobdetails", "window", "file_date", "total_trades"],
+            registry=reg
+        )
+        gauge_total = Gauge(
+            "bp_total_trades_job",
+            "Total trades per BP + JobDetails",
+            ["bp_name", "jobdetails", "window", "file_date"],
+            registry=reg
+        )
+
+        pushed = 0
+        # file_date: since grouped may include rows from multiple files, we will set file_date label to empty for aggregated (or use min/max)
+        # better: set file_date to the latest file_date in subset (user can filter by window anyway)
+        file_dates = sorted(set([d for d in subset["__file_date"] if d is not None]))
+        file_date_label = str(file_dates[-1]) if file_dates else ""
+
+        for _, row in grouped.iterrows():
+            bp = str(row["BP NAME"])
+            job = str(row["JobDetails"])
+            avgv = float(row["avg_durationpertrade"]) if not pd.isna(row["avg_durationpertrade"]) else 0.0
+            tot = float(row["total_trades"]) if not pd.isna(row["total_trades"]) else 0.0
+
+            try:
+                gauge_avg.labels(
+                    clean_label(bp),
+                    clean_label(job),
+                    win,
+                    file_date_label,
+                    str(int(tot))
+                ).set(avgv)
+                gauge_total.labels(
+                    clean_label(bp),
+                    clean_label(job),
+                    win,
+                    file_date_label
+                ).set(tot)
+                pushed += 1
+            except Exception as e:
+                print(f"[STATS] Failed to set agg gauges for bp={bp}, job={job}: {e}")
+
+        # push aggregated registry
+        try:
+            push_to_gateway(PUSHGATEWAY_URL, job=JOB_STATS + (f"_{win}" if win else "_none"), registry=reg)
+            print(f"Pushed AGG stats for window='{win}' -> job={JOB_STATS + (f'_{win}' if win else '_none')} (rows={pushed})")
+        except Exception as e:
+            print(f"Failed push STATS for window {win}: {e}")
+
+    print("All pushes complete.")
+
+if __name__ == "__main__":
+    push_all()
