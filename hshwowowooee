@@ -1,0 +1,37 @@
+[SERVICE]
+    Flush        1
+    Daemon       Off
+    Log_level    info
+    Parsers_File parsers.conf
+
+###################################################
+# INPUT — READ MULTIPLE FILES
+###################################################
+[INPUT]
+    Name            tail
+    Path            C:\\logs\\*.log
+    Tag             app.logs
+    DB              C:\\fluentbit\\state.db
+    Refresh_Interval 5
+    Parser          log_parser
+
+###################################################
+# FILTER — EXTRACT MESSAGE COUNT
+###################################################
+[FILTER]
+    Name   grep
+    Match  app.logs
+    Regex  message  No of messages processed
+
+[FILTER]
+    Name    parser
+    Match   app.logs
+    Key_Name message
+    Parser   msg_count_parser
+
+###################################################
+# OUTPUT — CHECK IN CONSOLE FIRST
+###################################################
+[OUTPUT]
+    Name   stdout
+    Match  *
