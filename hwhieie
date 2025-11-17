@@ -1,0 +1,35 @@
+[SERVICE]
+    Flush        1
+    Daemon       Off
+    Log_Level    info
+    Parsers_File parsers.conf
+
+###################################################
+# INPUT - READ LOG FILES
+###################################################
+
+[INPUT]
+    Name              tail
+    Path              C:\\Users\\deva\\Downloads\\logs\\*.log
+    DB                C:\\Users\\deva\\Downloads\\logs\\fb.db
+    Tag               win.logs
+    Refresh_Interval  5
+    Read_From_Head    On
+
+###################################################
+# OUTPUT - ELASTICSEARCH LOCAL
+###################################################
+
+[OUTPUT]
+    Name              es
+    Match             win.logs
+    Host              localhost
+    Port              9200
+    Index             win-logs-%Y.%m.%d
+    Logstash_Format   On
+
+    HTTP_User         elastic
+    HTTP_Passwd       YourPasswordHere
+
+    tls               On
+    tls.verify        Off
