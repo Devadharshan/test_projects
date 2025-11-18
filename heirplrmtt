@@ -1,0 +1,61 @@
+import os
+import re
+from glob import glob
+
+# Path to log folder
+LOG_DIR = r"C:\path\to\logs"
+
+# Regex patterns
+found_msg_pattern = re.compile(r"Found MQ message ID\[HEX\] =\[(.*?)\]", re.IGNORECASE)
+save_trade_pattern = re.compile(r"Save trade \[(.*?)\] complete", re.IGNORECASE)
+
+# Metrics
+total_found_messages = 0
+total_successful_trades = 0
+
+per_file_stats = {}
+
+# Read all log files
+log_files = glob(os.path.join(LOG_DIR, "AppFIMLImporter*_ProdLon_x64__*.log"))
+
+for log_file in log_files:
+    found_count = 0
+    saved_count = 0
+    trades = []
+
+    with open(log_file, "r", errors="ignore") as f:
+        for line in f:
+            # Check Found MQ Message
+            if found_msg_pattern.search(line):
+                found_count += 1
+
+            # Check Save Trade Completed
+            m = save_trade_pattern.search(line)
+            if m:
+                saved_count += 1
+                trades.append(m.group(1))
+
+    per_file_stats[os.path.basename(log_file)] = {
+        "found_messages": found_count,
+        "successful_trades": saved_count,
+        "trade_ids": trades,
+    }
+
+    total_found_messages += found_count
+    total_successful_trades += saved_count
+
+
+# -------- Output --------
+print("==== OVERALL SUMMARY ====")
+print(f"Total MQ messages found: {total_found_messages}")
+print(f"Total successful trades: {total_successful_trades}")
+print()
+
+print("==== PER FILE SUMMARY ====")
+for file, stats in per_file_stats.items():
+    print(f"{file}:")
+    print(f"  Found MQ messages     : {stats['found_messages']}")
+    print(f"  Successful trades     : {stats['successful_trades']}")
+    # Uncomment if you want trade IDs printed
+    # print(f"  Trade IDs             : {stats['trade_ids']}")
+    print()
