@@ -1,0 +1,149 @@
+import os
+import re
+from glob import glob
+from datetime import datetime
+from collections import deque
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+LOG_DIR = r"C:\path\to\logs"
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "log_metrics_job"
+
+# Regex Patterns
+found_pattern = re.compile(
+    r"Found\s+MQ\s+Mesaage\s+ID\s*\[Hex\]\s*=\s*\[(.*?)\]",
+    re.IGNORECASE
+)
+
+save_pattern = re.compile(
+    r"Save trade \[(.*?)\] complete",
+    re.IGNORECASE
+)
+
+failed_mq_pattern = re.compile(
+    r"Failed MQ Mesaage ID\s*\[Hex\]\s*=\s*\[(.*?)\]",
+    re.IGNORECASE
+)
+
+file_results = {}
+
+log_files = glob(os.path.join(LOG_DIR, "AppFIMLImporter*_ProdLon_x64__*.log"))
+
+for log_file in log_files:
+    start_queue = deque()
+    trades = []
+
+    mq_count = 0
+    trade_count = 0
+    failed_mq_count = 0
+
+    base_file = os.path.basename(log_file)
+
+    # Extract file date from filename
+    # Format: AppFIMLImporter_ProdLon_x64__2025-11-18.log
+    file_date = base_file.split("__")[-1].replace(".log", "")
+
+    with open(log_file, "r", errors="ignore") as f:
+        for line in f:
+            parts = line.strip().split("|")
+            if len(parts) < 7:
+                continue
+
+            date_str = parts[0].strip()
+            time_str = parts[1].strip()
+            msg = parts[6].strip()
+
+            dt_str = f"{date_str} {time_str}"
+
+            try:
+                ts = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S.%f")
+            except:
+                continue
+
+            # MQ FOUND
+            m1 = found_pattern.search(msg)
+            if m1:
+                msg_id = m1.group(1)
+                start_queue.append((ts, msg_id))
+                mq_count += 1
+                continue
+
+            # FAILED MQ
+            m_fail = failed_mq_pattern.search(msg)
+            if m_fail:
+                failed_mq_count += 1
+
+            # TRADE COMPLETE
+            m2 = save_pattern.search(msg)
+            if m2:
+                trade_id = m2.group(1)
+                trade_count += 1
+
+                if start_queue:
+                    start_ts, msg_id = start_queue.popleft()
+                    duration = (ts - start_ts).total_seconds()
+
+                    trades.append({
+                        "messageID": msg_id,
+                        "tradeID": trade_id,
+                        "start": start_ts,
+                        "end": ts,
+                        "duration_secs": duration
+                    })
+                continue
+
+    file_results[base_file] = {
+        "date": file_date,
+        "mq_count": mq_count,
+        "trade_count": trade_count,
+        "failed_mq_count": failed_mq_count,
+        "trades": trades
+    }
+
+
+# ----------------------------------------------------------
+# PUSH TO GATEWAY
+# ----------------------------------------------------------
+registry = CollectorRegistry()
+
+# File-level gauges
+g_mq = Gauge("log_mq_messages_total", "Total MQ messages", ["file_name", "file_date"], registry=registry)
+g_trade = Gauge("log_trades_processed_total", "Total successful trades", ["file_name", "file_date"], registry=registry)
+g_fail = Gauge("log_failed_mq_messages_total", "Total failed MQ messages", ["file_name", "file_date"], registry=registry)
+g_avg = Gauge("log_avg_trade_time_seconds", "Average trade time in seconds", ["file_name", "file_date"], registry=registry)
+
+# Per-trade gauge
+g_trade_dur = Gauge(
+    "log_trade_duration_seconds",
+    "Duration of each trade in seconds",
+    ["file_name", "file_date", "trade_id"],
+    registry=registry
+)
+
+# Fill metrics
+for fname, data in file_results.items():
+
+    file_date = data["date"]
+
+    # File level metrics
+    g_mq.labels(fname, file_date).set(data["mq_count"])
+    g_trade.labels(fname, file_date).set(data["trade_count"])
+    g_fail.labels(fname, file_date).set(data["failed_mq_count"])
+
+    if data["trades"]:
+        avg_time = sum(t["duration_secs"] for t in data["trades"]) / len(data["trades"])
+    else:
+        avg_time = 0
+
+    g_avg.labels(fname, file_date).set(avg_time)
+
+    # Per-trade metrics
+    for t in data["trades"]:
+        g_trade_dur.labels(
+            fname, file_date, t["tradeID"]
+        ).set(t["duration_secs"])
+
+# PUSH
+push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+
+print("Metrics pushed successfully!")
