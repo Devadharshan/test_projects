@@ -1,0 +1,104 @@
+import os
+import re
+from glob import glob
+from datetime import datetime
+from collections import deque
+
+LOG_DIR = r"C:\path\to\logs"
+
+# Regex patterns
+found_pattern = re.compile(
+    r"Found\s+MQ\s+Mesaage\s+ID\s*\[Hex\]\s*=\s*\[(.*?)\]",
+    re.IGNORECASE,
+)
+
+save_pattern = re.compile(
+    r"Save trade \[(.*?)\] complete",
+    re.IGNORECASE,
+)
+
+# Store per-file results
+file_results = {}
+
+log_files = glob(os.path.join(LOG_DIR, "AppFIMLImporter*_ProdLon_x64__*.log"))
+
+for log_file in log_files:
+
+    # Queue of (timestamp, messageID)
+    start_queue = deque()
+
+    # Results for this file
+    trades = []
+
+    with open(log_file, "r", errors="ignore") as f:
+        for line in f:
+            parts = line.strip().split("|")
+            if len(parts) < 7:
+                continue
+
+            date_str = parts[0].strip()
+            time_str = parts[1].strip()
+            msg = parts[6].strip()
+
+            dt_str = f"{date_str} {time_str}"
+
+            try:
+                ts = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S.%f")
+            except:
+                continue
+
+            # Found MQ
+            m1 = found_pattern.search(msg)
+            if m1:
+                msg_id = m1.group(1)
+                start_queue.append((ts, msg_id))
+                continue
+
+            # Save trade complete
+            m2 = save_pattern.search(msg)
+            if m2:
+                trade_id = m2.group(1)
+
+                if start_queue:
+                    start_ts, msg_id = start_queue.popleft()
+                    duration = (ts - start_ts).total_seconds()
+
+                    trades.append({
+                        "messageID": msg_id,
+                        "tradeID": trade_id,
+                        "start": start_ts,
+                        "end": ts,
+                        "duration_secs": duration
+                    })
+
+                continue
+
+    file_results[os.path.basename(log_file)] = trades
+
+
+# -------------- OUTPUT -----------------
+print("\n========== PER FILE TRADE TIMES ==========\n")
+
+overall = []
+
+for file, trades in file_results.items():
+    print(f"\n--- {file} ---")
+
+    if not trades:
+        print("No trades found in this file.")
+        continue
+
+    for t in trades:
+        print(f"TradeID {t['tradeID']} | Duration: {t['duration_secs']} sec")
+
+    avg = sum(t["duration_secs"] for t in trades) / len(trades)
+    print(f"Avg duration: {avg:.2f} sec")
+
+    overall.extend(trades)
+
+print("\n========== OVERALL SUMMARY ==========\n")
+print(f"Total trades processed: {len(overall)}")
+
+if overall:
+    avg_total = sum(t["duration_secs"] for t in overall) / len(overall)
+    print(f"Overall average processing time: {avg_total:.2f} sec")
