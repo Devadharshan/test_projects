@@ -1,0 +1,156 @@
+import os
+import re
+from glob import glob
+from datetime import datetime
+from collections import deque
+import requests
+import time
+
+LOG_DIR = r"D:\logs"   # <--- CHANGE THIS
+PUSHGATEWAY_URL = "http://localhost:9091/metrics/job/log_metrics"
+
+# Regex patterns for log matching
+found_pattern = re.compile(
+    r"Found\s+MQ\s+Mesaage\s+ID\s*$begin:math:display$Hex$end:math:display$\s*=\s*$begin:math:display$\(\.\*\?\)$end:math:display$",
+    re.IGNORECASE
+)
+
+save_pattern = re.compile(
+    r"Save trade $begin:math:display$\(\.\*\?\)$end:math:display$ complete",
+    re.IGNORECASE
+)
+
+failed_mq_pattern = re.compile(
+    r"Failed\s+MQ\s+Mesaage\s+ID\s*$begin:math:display$Hex$end:math:display$\s*$begin:math:display$\(\.\*\?\)$end:math:display$",
+    re.IGNORECASE
+)
+
+# Extract name + date from filename
+# Example: AppFIMLImporter_ProdLon_x64__2025-11-18.log
+FILE_PATTERN = re.compile(r"^(AppFIMLImporter2?|AppFIMLImporter)_.*__(\d{4}-\d{2}-\d{2})\.log$")
+
+
+def extract_labels(filename):
+    """
+    Extracts:
+    name = AppFIMLImporter / AppFIMLImporter2
+    date = YYYY-MM-DD
+    """
+    match = FILE_PATTERN.match(filename)
+    if match:
+        return match.group(1), match.group(2)
+    return None, None
+
+
+def process_file(log_file):
+    """
+    Parses the log file and returns metrics.
+    """
+    start_queue = deque()
+    trades = []
+
+    mq_count = 0
+    trade_count = 0
+    failed_mq_count = 0
+
+    with open(log_file, "r", errors="ignore") as f:
+        for line in f:
+            parts = line.strip().split("|")
+            if len(parts) < 7:
+                continue
+
+            dt_str = f"{parts[0].strip()} {parts[1].strip()}"
+
+            try:
+                ts = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S.%f")
+            except:
+                continue
+
+            msg = parts[6].strip()
+
+            # MQ Found
+            m1 = found_pattern.search(msg)
+            if m1:
+                mq_count += 1
+                start_queue.append((ts, m1.group(1)))
+                continue
+
+            # Failed MQ
+            m_fail = failed_mq_pattern.search(msg)
+            if m_fail:
+                failed_mq_count += 1
+
+            # Trade complete
+            m2 = save_pattern.search(msg)
+            if m2:
+                trade_count += 1
+                trade_id = m2.group(1)
+
+                if start_queue:
+                    start_ts, msg_id = start_queue.popleft()
+                    duration = (ts - start_ts).total_seconds()
+
+                    trades.append({
+                        "messageID": msg_id,
+                        "tradeID": trade_id,
+                        "start": start_ts,
+                        "end": ts,
+                        "duration_secs": duration
+                    })
+
+    return mq_count, trade_count, failed_mq_count, trades
+
+
+def push_metrics(name, date, mq_count, trade_count, failed_count, trades):
+    """
+    Builds and pushes all metrics for one file.
+    """
+
+    metrics = []
+
+    # MQ counters
+    metrics.append(
+        f'mq_messages_total{{name="{name}", date="{date}"}} {mq_count}'
+    )
+    metrics.append(
+        f'trades_total{{name="{name}", date="{date}"}} {trade_count}'
+    )
+    metrics.append(
+        f'failed_mq_messages_total{{name="{name}", date="{date}"}} {failed_count}'
+    )
+
+    # Individual trade durations (each with tradeID label)
+    for t in trades:
+        metrics.append(
+            f'trade_duration_seconds{{name="{name}", date="{date}", tradeID="{t["tradeID"]}"}} {t["duration_secs"]}'
+        )
+
+    # Average duration
+    if trades:
+        avg = sum(t["duration_secs"] for t in trades) / len(trades)
+        metrics.append(
+            f'avg_trade_duration_seconds{{name="{name}", date="{date}"}} {avg}'
+        )
+
+    payload = "\n".join(metrics) + "\n"
+
+    requests.post(PUSHGATEWAY_URL, data=payload)
+    print(f"Pushed metrics for {name} | {date}")
+
+
+# ====================== MAIN LOOP =========================
+
+while True:
+    log_files = glob(os.path.join(LOG_DIR, "*.log"))
+
+    for filepath in log_files:
+        filename = os.path.basename(filepath)
+
+        name, date = extract_labels(filename)
+        if not name:
+            continue
+
+        mq_count, trade_count, failed_count, trades = process_file(filepath)
+        push_metrics(name, date, mq_count, trade_count, failed_count, trades)
+
+    time.sleep(30)
