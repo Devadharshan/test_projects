@@ -1,0 +1,103 @@
+import os
+import re
+from glob import glob
+from datetime import datetime
+
+LOG_DIR = r"C:\path\to\logs"
+
+# Regex patterns
+found_pattern = re.compile(
+    r"Found\s+MQ\s+Mesaage\s+ID\s*\[Hex\]\s*=\s*\[(.*?)\]",
+    re.IGNORECASE
+)
+
+save_pattern = re.compile(
+    r"Save trade \[(.*?)\] complete",
+    re.IGNORECASE
+)
+
+# Track events
+start_events = []   # list of (timestamp, messageID)
+end_events = []     # list of (timestamp, tradeID)
+
+# Read log files
+log_files = glob(os.path.join(LOG_DIR, "AppFIMLImporter*_ProdLon_x64__*.log"))
+
+for log_file in log_files:
+    with open(log_file, "r", errors="ignore") as f:
+        for line in f:
+            parts = line.strip().split("|")
+            if len(parts) < 7:
+                continue
+
+            date_str = parts[0].strip()
+            time_str = parts[1].strip()
+            message = parts[6].strip()
+
+            # Build full datetime string
+            dt_str = f"{date_str} {time_str}"
+
+            # Parse timestamp
+            try:
+                ts = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S.%f")
+            except:
+                continue
+
+            # START event
+            m1 = found_pattern.search(message)
+            if m1:
+                msg_id = m1.group(1)
+                start_events.append((ts, msg_id))
+                continue
+
+            # END event
+            m2 = save_pattern.search(message)
+            if m2:
+                trade_id = m2.group(1)
+                end_events.append((ts, trade_id))
+                continue
+
+
+# -------- MATCH START TO END --------
+trade_results = []
+
+# We assume log lines are sequential.
+# So each Save trade matches the nearest previous Found MQ message.
+si = 0  # pointer for start events
+
+for end_ts, trade_id in end_events:
+    # Find nearest start event before this end event
+    while si < len(start_events) and start_events[si][0] <= end_ts:
+        si += 1
+    
+    # The correct start event is the one just before si
+    if si == 0:
+        continue  # no start found
+
+    start_ts, msg_id = start_events[si - 1]
+
+    duration = (end_ts - start_ts).total_seconds()
+
+    trade_results.append({
+        "messageID": msg_id,
+        "tradeID": trade_id,
+        "start": start_ts,
+        "end": end_ts,
+        "duration_secs": duration
+    })
+
+
+# -------- OUTPUT --------
+print("\n==== TRADE PROCESSING TIMES ====\n")
+for tr in trade_results:
+    print(f"MessageID: {tr['messageID']}")
+    print(f"TradeID  : {tr['tradeID']}")
+    print(f"Start    : {tr['start']}")
+    print(f"End      : {tr['end']}")
+    print(f"Duration : {tr['duration_secs']} seconds\n")
+
+print("==== SUMMARY ====")
+print(f"Total trades processed: {len(trade_results)}")
+if trade_results:
+    avg = sum(t['duration_secs'] for t in trade_results) / len(trade_results)
+    print(f"Average processing time: {avg:.2f} seconds")
