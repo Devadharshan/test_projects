@@ -1,0 +1,139 @@
+import os
+import re
+from glob import glob
+from datetime import datetime
+from collections import deque
+
+LOG_DIR = r"C:\path\to\logs"
+
+# Regex patterns
+found_pattern = re.compile(
+    r"Found\s+MQ\s+Mesaage\s+ID\s*\[Hex\]\s*=\s*\[(.*?)\]",
+    re.IGNORECASE,
+)
+
+save_pattern = re.compile(
+    r"Save trade \[(.*?)\] complete",
+    re.IGNORECASE,
+)
+
+# Placeholder - same as found for now (you can change later)
+failed_mq_pattern = re.compile(
+    r"Found\s+MQ\s+Mesaage\s+ID\s*\[Hex\]\s*\[(.*?)\]", 
+    re.IGNORECASE
+)
+
+# Store per-file results
+file_results = {}
+
+log_files = glob(os.path.join(LOG_DIR, "AppFIMLImporter*_ProdLon_x64__*.log"))
+
+for log_file in log_files:
+
+    start_queue = deque()       # for pairing start → end
+    trades = []                 # list of trade final results
+
+    mq_count = 0
+    trade_count = 0
+    failed_mq_count = 0         # placeholder for now
+
+    with open(log_file, "r", errors="ignore") as f:
+        for line in f:
+            parts = line.strip().split("|")
+            if len(parts) < 7:
+                continue
+
+            date_str = parts[0].strip()
+            time_str = parts[1].strip()
+            msg = parts[6].strip()
+
+            dt_str = f"{date_str} {time_str}"
+
+            try:
+                ts = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S.%f")
+            except:
+                continue
+
+            # MQ FOUND
+            m1 = found_pattern.search(msg)
+            if m1:
+                msg_id = m1.group(1)
+                start_queue.append((ts, msg_id))
+                mq_count += 1
+                continue
+
+            # FAILED MQ (placeholder - same match for now)
+            m_fail = failed_mq_pattern.search(msg)
+            if m_fail:
+                failed_mq_count += 1
+
+            # TRADE COMPLETE
+            m2 = save_pattern.search(msg)
+            if m2:
+                trade_id = m2.group(1)
+                trade_count += 1
+
+                if start_queue:
+                    start_ts, msg_id = start_queue.popleft()
+                    duration = (ts - start_ts).total_seconds()
+
+                    trades.append({
+                        "messageID": msg_id,
+                        "tradeID": trade_id,
+                        "start": start_ts,
+                        "end": ts,
+                        "duration_secs": duration
+                    })
+                continue
+
+    file_results[os.path.basename(log_file)] = {
+        "mq_count": mq_count,
+        "trade_count": trade_count,
+        "failed_mq_count": failed_mq_count,
+        "trades": trades
+    }
+
+
+# --------- REPORT OUTPUT ----------
+overall_mq = 0
+overall_trades = 0
+overall_failed = 0
+overall_durations = []
+
+print("\n========== PER FILE REPORT ==========\n")
+
+for file, data in file_results.items():
+
+    print(f"\n--- {file} ---")
+    print(f"Total MQ messages       : {data['mq_count']}")
+    print(f"Total Trades Saved      : {data['trade_count']}")
+    print(f"Failed MQ messages      : {data['failed_mq_count']}")
+
+    if not data["trades"]:
+        print("No trades found in this file.")
+    else:
+        print("Trade Timings:")
+        for t in data["trades"]:
+            print(f"  TradeID {t['tradeID']} | {t['duration_secs']} sec")
+
+        avg_file = sum(t["duration_secs"] for t in data["trades"]) / len(data["trades"])
+        print(f"Avg Trade Time          : {avg_file:.2f} sec")
+
+    # accumulate overall numbers
+    overall_mq += data["mq_count"]
+    overall_trades += data["trade_count"]
+    overall_failed += data["failed_mq_count"]
+    overall_durations.extend([t["duration_secs"] for t in data["trades"]])
+
+
+# -------- OVERALL SUMMARY -------
+print("\n========== OVERALL SUMMARY ==========\n")
+print(f"Total MQ Messages       : {overall_mq}")
+print(f"Total Trades Processed  : {overall_trades}")
+print(f"Total Failed MQ Msgs    : {overall_failed}")
+
+if overall_durations:
+    avg_total = sum(overall_durations) / len(overall_durations)
+    print(f"Overall Avg Trade Time  : {avg_total:.2f} sec")
+else:
+    print("Overall Avg Trade Time  : No trades found")
