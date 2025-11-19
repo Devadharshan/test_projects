@@ -1,0 +1,126 @@
+import os
+import pandas as pd
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+from datetime import datetime, timedelta, timezone
+
+# ---------------------------------------------------------
+# CONFIG
+# ---------------------------------------------------------
+CSV_DIR = r"C:\path\to\csvs"
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "bp_trade_rows"
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+WINDOWS = {
+    "today": 0,
+    "yesterday": 1,
+    "last7days": 7,
+    "last30days": 30
+}
+
+
+# ---------------------------------------------------------
+# HELPERS
+# ---------------------------------------------------------
+def parse_date_from_filename(filename):
+    """Extract date from file name like something__2025-01-10.csv"""
+    try:
+        date_part = filename.split("__")[-1].replace(".csv", "")
+        return datetime.strptime(date_part, "%Y-%m-%d").date()
+    except:
+        return None
+
+
+def get_csv_files_within_days(base_dir, days):
+    cutoff = datetime.now(IST).date() - timedelta(days=days)
+    result = []
+    for f in os.listdir(base_dir):
+        if f.endswith(".csv") and "_summary" not in f:
+            file_date = parse_date_from_filename(f)
+            if file_date and file_date >= cutoff:
+                result.append((os.path.join(base_dir, f), file_date))
+    return result
+
+
+def normalize_label(s):
+    """Prometheus-safe label names"""
+    return (
+        str(s)
+        .strip()
+        .lower()
+        .replace(" ", "_")
+        .replace("-", "_")
+        .replace("(", "")
+        .replace(")", "")
+    )
+
+
+# ---------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------
+def push_metrics():
+
+    registry = CollectorRegistry()
+
+    # We will CREATE the gauge dynamically after reading CSV columns  
+    gauge = None
+
+    # Process windows
+    for window_name, window_days in WINDOWS.items():
+
+        files = get_csv_files_within_days(CSV_DIR, window_days)
+        if not files:
+            continue
+
+        for file_path, file_date in files:
+
+            try:
+                df = pd.read_csv(file_path)
+                df.columns = [normalize_label(c) for c in df.columns]
+
+                if "durationpertrade" not in df.columns:
+                    print("❌ Missing 'DurationPerTrade' in:", file_path)
+                    continue
+
+                # Convert numeric column
+                df["durationpertrade"] = pd.to_numeric(df["durationpertrade"], errors="coerce").fillna(0)
+
+                # -----------------------------------------------------
+                # Create the GAUGE only ONCE based on CSV columns
+                # -----------------------------------------------------
+                if gauge is None:
+                    label_names = list(df.columns)
+                    label_names.append("window")
+                    label_names.append("file_date")
+
+                    gauge = Gauge(
+                        "bp_durationpertrade_raw",
+                        "Raw DurationPerTrade values (one metric per row)",
+                        label_names,
+                        registry=registry
+                    )
+
+                # -----------------------------------------------------
+                # PUSH each CSV ROW as a PROMETHEUS TIME SERIES
+                # -----------------------------------------------------
+                for _, row in df.iterrows():
+
+                    label_values = {col: str(row[col]) for col in df.columns}
+                    label_values["window"] = window_name
+                    label_values["file_date"] = str(file_date)
+
+                    gauge.labels(**label_values).set(row["durationpertrade"])
+
+            except Exception as e:
+                print("❌ Error processing", file_path, e)
+
+    # ---------------------------------------------------------
+    # PUSH TO GATEWAY
+    # ---------------------------------------------------------
+    push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+    print("✅ Successfully pushed raw DurationPerTrade metrics!")
+
+
+if __name__ == "__main__":
+    push_metrics()
