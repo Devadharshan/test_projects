@@ -1,0 +1,229 @@
+import os
+import re
+from glob import glob
+from datetime import datetime
+from collections import deque
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+LOG_DIR = r"C:\path\to\logs"
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "log_metrics_job"
+
+
+# ---------------------------------------------------------
+# REGEX PATTERNS
+# ---------------------------------------------------------
+
+# Start of trade (MQ message)
+start_pattern = re.compile(
+    r"Found\s+MQ\s+Mesaage\s+ID\s*\[Hex\]\s*=\s*\[(.*?)\]",
+    re.IGNORECASE
+)
+
+# End of trade
+end_pattern = re.compile(
+    r"Save trade \[(.*?)\] complete",
+    re.IGNORECASE
+)
+
+# QProxy RequestManagerCall
+qproxy_request_pattern = re.compile(
+    r"Received RequestManagerCall response from QProxy for Requestid (\d+) in ([\d\.]+) s",
+    re.IGNORECASE
+)
+
+# QProxy PV01 SLOW
+pv01_pattern = re.compile(
+    r"Received PV01 response from QProxy for (\d+) with Request Id (\d+) in ([\d\.]+) s\s+\[\*\*SLOW\*\*\]",
+    re.IGNORECASE
+)
+
+
+# ---------------------------------------------------------
+# Extract name from file name
+# Example:
+# AppFIMLImporter_ProdLon_x64__2025-11-18.log → AppFIMLImporter
+# ---------------------------------------------------------
+def extract_name(filename):
+    return filename.split("_")[0]
+
+
+# ---------------------------------------------------------
+# FILE DISCOVERY USING GLOB + REGEX
+# ---------------------------------------------------------
+all_files = glob(os.path.join(LOG_DIR, "*.log"))
+
+file_regex = re.compile(r"^(AppFIMLImporter\d*)_.*__([\d\-]+)\.log$")
+
+valid_log_files = []
+
+for f in all_files:
+    base = os.path.basename(f)
+    if file_regex.match(base):
+        valid_log_files.append(f)
+
+file_results = {}
+
+
+# ---------------------------------------------------------
+# PROCESS EACH LOG FILE
+# ---------------------------------------------------------
+for log_file in valid_log_files:
+
+    base_file = os.path.basename(log_file)
+    m = file_regex.match(base_file)
+
+    name_label = m.group(1)       # AppFIMLImporter OR AppFIMLImporter2
+    file_date = m.group(2)        # 2025-11-18
+
+    start_queue = deque()
+    trades = []
+
+    qproxy_calls = []
+    pv01_calls = []
+
+    with open(log_file, "r", errors="ignore") as f:
+        for line in f:
+            parts = line.strip().split("|")
+            if len(parts) < 7:
+                continue
+
+            dt_str = f"{parts[0].strip()} {parts[1].strip()}"
+            try:
+                ts = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S.%f")
+            except:
+                continue
+
+            msg = parts[6].strip()
+
+            # ---------------------------------------------------------
+            # START detected
+            # ---------------------------------------------------------
+            m_start = start_pattern.search(msg)
+            if m_start:
+                start_queue.append((ts, m_start.group(1)))
+                continue
+
+            # ---------------------------------------------------------
+            # END detected
+            # ---------------------------------------------------------
+            m_end = end_pattern.search(msg)
+            if m_end and start_queue:
+                start_ts, message_id = start_queue.popleft()
+                duration = (ts - start_ts).total_seconds()
+
+                trades.append({
+                    "message_id": message_id,
+                    "trade_id": m_end.group(1),
+                    "duration": duration
+                })
+                continue
+
+            # ---------------------------------------------------------
+            # QProxy REQUESTMANAGERCALL
+            # ---------------------------------------------------------
+            m_req = qproxy_request_pattern.search(msg)
+            if m_req:
+                request_id = m_req.group(1)
+                time_sec = float(m_req.group(2))
+
+                qproxy_calls.append({
+                    "request_id": request_id,
+                    "duration": time_sec
+                })
+
+            # ---------------------------------------------------------
+            # QProxy PV01 SLOW
+            # ---------------------------------------------------------
+            m_pv01 = pv01_pattern.search(msg)
+            if m_pv01:
+                value = m_pv01.group(1)
+                request_id = m_pv01.group(2)
+                time_sec = float(m_pv01.group(3))
+
+                pv01_calls.append({
+                    "value": value,
+                    "request_id": request_id,
+                    "duration": time_sec
+                })
+
+    file_results[base_file] = {
+        "name": name_label,
+        "file_date": file_date,
+        "trades": trades,
+        "qproxy_calls": qproxy_calls,
+        "pv01_calls": pv01_calls
+    }
+
+
+# ---------------------------------------------------------
+# PROMETHEUS METRICS
+# ---------------------------------------------------------
+registry = CollectorRegistry()
+
+g_trade_duration = Gauge(
+    "trade_duration_seconds",
+    "Duration of trade from MQ start to Save Trade",
+    ["name", "file_name", "file_date", "trade_id", "message_id"],
+    registry=registry
+)
+
+g_qproxy_request = Gauge(
+    "qproxy_request_time_seconds",
+    "QProxy RequestManagerCall time",
+    ["name", "file_name", "file_date", "request_id"],
+    registry=registry
+)
+
+g_pv01_time = Gauge(
+    "qproxy_pv01_slow_time_seconds",
+    "QProxy PV01 SLOW time",
+    ["name", "file_name", "file_date", "value", "request_id"],
+    registry=registry
+)
+
+
+# ---------------------------------------------------------
+# FILL METRICS
+# ---------------------------------------------------------
+for fname, data in file_results.items():
+
+    name_label = data["name"]
+    file_date = data["file_date"]
+
+    # Trade duration metrics
+    for t in data["trades"]:
+        g_trade_duration.labels(
+            name_label,
+            fname,
+            file_date,
+            t["trade_id"],
+            t["message_id"]
+        ).set(t["duration"])
+
+    # QProxy RequestManagerCall
+    for q in data["qproxy_calls"]:
+        g_qproxy_request.labels(
+            name_label,
+            fname,
+            file_date,
+            q["request_id"]
+        ).set(q["duration"])
+
+    # QProxy PV01 SLOW
+    for p in data["pv01_calls"]:
+        g_pv01_time.labels(
+            name_label,
+            fname,
+            file_date,
+            p["value"],
+            p["request_id"]
+        ).set(p["duration"])
+
+
+# ---------------------------------------------------------
+# PUSH TO GATEWAY
+# ---------------------------------------------------------
+push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+
+print("Metrics pushed successfully!")
