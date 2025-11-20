@@ -1,0 +1,359 @@
+import os
+import re
+from glob import glob
+from datetime import datetime
+from collections import deque
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway, pushadd_to_gateway
+
+# ----------------- CONFIG -----------------
+LOG_DIR = r"C:\path\to\logs"               # <-- update
+PUSHGATEWAY_URL = "http://localhost:9091"  # <-- update if needed
+JOB_NAME = "log_metrics_job"
+
+DEBUG = False
+MAX_WARN = 3600  # optional: warn if duration > this (seconds)
+
+# ----------------- REGEX -----------------
+pretrade_pattern = re.compile(
+    r"Saved\s+Focus\s+trade\s+(\d+)\s+from\s+pretrade",
+    re.IGNORECASE
+)
+
+start_pattern = re.compile(
+    r"Found\s+MQ\s+Message\s+ID\s*\[Hex\]\s*=\s*\[(.*?)\]",
+    re.IGNORECASE
+)
+
+end_pattern = re.compile(
+    r"Save trade \[(.*?)\] complete",
+    re.IGNORECASE
+)
+
+failed_mq_pattern = re.compile(
+    r"Failed\s+to\s+Find\s+MQ\s+Message\s+ID\s*\[Hex\]\s*=\s*\[.*?\]",
+    re.IGNORECASE
+)
+
+qproxy_request_pattern = re.compile(
+    r"Received\s+RequestManagerCall\s+response\s+from\s+QProxy\s+for\s+Requestid\s+(\d+)\s+in\s+([\d.]+)\s*s",
+    re.IGNORECASE
+)
+
+pv01_pattern = re.compile(
+    r"Received\s+PV01\s+response\s+from\s+QProxy\s+for\s+(\d+)\s+with\s+Request\s+Id\s+(\d+)\s+in\s+([\d.]+)\s*s",
+    re.IGNORECASE
+)
+
+file_regex = re.compile(r"^(AppFIMLImporter\d*)_.*__([\d\-]+)\.log$")
+
+# ----------------- HELPERS -----------------
+def parse_line_ts(parts):
+    """
+    Robust timestamp parser:
+      1) try parts[0] + " " + parts[1]
+      2) otherwise scan each part for a full timestamp "YYYY-MM-DD HH:MM:SS.sss"
+    Returns datetime or None.
+    """
+    if len(parts) >= 2:
+        dt_str = f"{parts[0].strip()} {parts[1].strip()}"
+        try:
+            return datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S.%f")
+        except Exception:
+            pass
+
+    # fallback: scan all parts for a full timestamp
+    for p in parts:
+        p = p.strip()
+        try:
+            return datetime.strptime(p, "%Y-%m-%d %H:%M:%S.%f")
+        except Exception:
+            continue
+
+    return None
+
+
+def extract_name_from_filename(base):
+    m = file_regex.match(base)
+    if m:
+        return m.group(1), m.group(2)
+    return None, None
+
+
+# =====================================================================
+#                     PROCESS FILES
+# =====================================================================
+
+file_results = {}
+log_files = glob(os.path.join(LOG_DIR, "AppFIMLImporter*_ProdLon_x64__*.log"))
+
+for log_file in log_files:
+    base = os.path.basename(log_file)
+    name_label, file_date = extract_name_from_filename(base)
+    if not name_label:
+        if DEBUG:
+            print("Skipping file (name/date not matched):", base)
+        continue
+
+    # start_stack holds start frames (LIFO). Each frame:
+    # { "start_ts": datetime, "msg_id": str, "trade_id": str|None, "qproxy": [], "pv01": [] }
+    start_stack = []
+
+    # pending_pretrades is FIFO list of trade_ids obtained from "Saved Focus trade ..."
+    pending_pretrades = deque()
+
+    # completed structures
+    trades = []
+    qproxy_calls = []
+    pv01_calls = []
+
+    mq_total = 0
+    mq_failed = 0
+
+    with open(log_file, "r", errors="ignore") as fh:
+        for raw in fh:
+            line = raw.rstrip("\n")
+            parts = line.split("|")
+            ts = parse_line_ts(parts)
+            if ts is None:
+                continue
+
+            # message field — assumed at index 6 (if not present, empty)
+            msg = parts[6].strip() if len(parts) >= 7 else ""
+
+            # ----------------- PRETRADE -----------------
+            m = pretrade_pattern.search(msg)
+            if m:
+                tid = m.group(1)
+                # Add to pending pretrades only if not already pending or active
+                if tid not in pending_pretrades:
+                    pending_pretrades.append(tid)
+                continue
+
+            # ----------------- START (Found MQ Message ID ...) -----------------
+            m = start_pattern.search(msg)
+            if m:
+                mq_total += 1
+                msg_id = m.group(1)
+
+                # create a new start frame
+                frame = {
+                    "start_ts": ts,
+                    "msg_id": msg_id,
+                    "trade_id": None,
+                    "qproxy": [],
+                    "pv01": []
+                }
+
+                # If we have a pending pretrade id, assign it to this start (FIFO)
+                if pending_pretrades:
+                    frame["trade_id"] = pending_pretrades.popleft()
+
+                start_stack.append(frame)
+                continue
+
+            # ----------------- FAILED MQ -----------------
+            if failed_mq_pattern.search(msg):
+                mq_failed += 1
+                # continue parsing other patterns on same line if any
+
+            # ----------------- QPROXY RequestManagerCall -----------------
+            m = qproxy_request_pattern.search(msg)
+            if m:
+                req_id = m.group(1)
+                dur = float(m.group(2))
+
+                # attach to most recent start frame if present
+                if start_stack:
+                    start_stack[-1]["qproxy"].append({
+                        "request_id": req_id,
+                        "duration": dur
+                    })
+                else:
+                    # orphan — no active start to attach to
+                    qproxy_calls.append({
+                        "trade_id": None,
+                        "request_id": req_id,
+                        "duration": dur
+                    })
+                continue
+
+            # ----------------- PV01 -----------------
+            m = pv01_pattern.search(msg)
+            if m:
+                value = m.group(1)
+                req_id = m.group(2)
+                dur = float(m.group(3))
+
+                if start_stack:
+                    start_stack[-1]["pv01"].append({
+                        "value": value,
+                        "request_id": req_id,
+                        "duration": dur
+                    })
+                else:
+                    pv01_calls.append({
+                        "trade_id": None,
+                        "value": value,
+                        "request_id": req_id,
+                        "duration": dur
+                    })
+                continue
+
+            # ----------------- END (Save trade [tradeid] complete) -----------------
+            m = end_pattern.search(msg)
+            if m:
+                tid = m.group(1)
+
+                # Prefer to find a start frame that already has this trade_id assigned
+                matched_idx = None
+                for i in range(len(start_stack) - 1, -1, -1):
+                    frame = start_stack[i]
+                    if frame["trade_id"] == tid:
+                        matched_idx = i
+                        break
+
+                # If not found, find the most recent start frame whose start_ts <= end_ts
+                if matched_idx is None:
+                    for i in range(len(start_stack) - 1, -1, -1):
+                        frame = start_stack[i]
+                        if frame["start_ts"] <= ts:
+                            matched_idx = i
+                            break
+
+                if matched_idx is None:
+                    # No start to match → we can't compute duration; log (DEBUG) and skip
+                    if DEBUG:
+                        print(f"[WARN] No start found to match END trade {tid} at {ts} in {base}")
+                    # clear any pending pretrade if it equals tid (safety)
+                    try:
+                        if pending_pretrades and pending_pretrades[0] == tid:
+                            pending_pretrades.popleft()
+                    except Exception:
+                        pass
+                    continue
+
+                # Pop that matched start frame
+                frame = start_stack.pop(matched_idx)
+                start_ts = frame["start_ts"]
+                msg_id = frame["msg_id"]
+
+                # compute duration
+                duration = (ts - start_ts).total_seconds()
+
+                # sanity checks
+                if duration < 0:
+                    if DEBUG:
+                        print(f"[WARN] Negative duration for trade {tid} in {base}: {duration}")
+                    # skip negative duration
+                    continue
+                if duration > MAX_WARN:
+                    print(f"[WARN] Large trade time {duration:.3f}s for trade {tid} in {base} (start {start_ts} end {ts})")
+
+                # record completed trade
+                trades.append({
+                    "trade_id": tid,
+                    "message_id": msg_id,
+                    "start": start_ts,
+                    "end": ts,
+                    "duration": duration
+                })
+
+                # flush qproxy & pv01 events that were attached to this start frame,
+                # assigning this trade id to them
+                for q in frame["qproxy"]:
+                    qproxy_calls.append({
+                        "trade_id": tid,
+                        "request_id": q["request_id"],
+                        "duration": q["duration"]
+                    })
+                for p in frame["pv01"]:
+                    pv01_calls.append({
+                        "trade_id": tid,
+                        "value": p["value"],
+                        "request_id": p["request_id"],
+                        "duration": p["duration"]
+                    })
+
+                continue
+
+    # end for lines in file
+
+    file_results[base] = {
+        "name": name_label,
+        "file_date": file_date,
+        "mq_total": mq_total,
+        "mq_failed": mq_failed,
+        "trades": trades,
+        "qproxy": qproxy_calls,
+        "pv01": pv01_calls
+    }
+
+# =====================================================================
+#                     PROMETHEUS METRICS
+# =====================================================================
+
+registry = CollectorRegistry()
+labels = ["name", "file_name", "file_date"]
+
+g_mq_total = Gauge("log_mq_messages_total", "Total MQ messages", labels, registry=registry)
+g_mq_failed = Gauge("log_failed_mq_messages_total", "Total failed MQ messages", labels, registry=registry)
+
+g_trades_processed_total = Gauge(
+    "log_trades_processed_total",
+    "Total trades processed",
+    ["name", "file_name", "file_date"],
+    registry=registry
+)
+
+g_trade_duration = Gauge(
+    "log_trade_duration_seconds",
+    "Duration between MQ found and Save trade",
+    ["name", "file_name", "file_date", "trade_id", "message_id"],
+    registry=registry
+)
+
+g_qproxy = Gauge(
+    "log_qproxy_request_time_seconds",
+    "QProxy RequestManagerCall time",
+    ["name", "file_name", "file_date", "trade_id", "request_id"],
+    registry=registry
+)
+
+g_pv01 = Gauge(
+    "log_qproxy_pv01_time_seconds",
+    "QProxy PV01 time",
+    ["name", "file_name", "file_date", "trade_id", "value", "request_id"],
+    registry=registry
+)
+
+# ----------------- FILL METRICS -----------------
+for fname, data in file_results.items():
+    name_label = data["name"]
+    file_date = data["file_date"]
+
+    g_mq_total.labels(name_label, fname, file_date).set(data["mq_total"])
+    g_mq_failed.labels(name_label, fname, file_date).set(data["mq_failed"])
+    g_trades_processed_total.labels(name_label, fname, file_date).set(len(data["trades"]))
+
+    for t in data["trades"]:
+        g_trade_duration.labels(
+            name_label, fname, file_date, t["trade_id"], t["message_id"]
+        ).set(t["duration"])
+
+    for q in data["qproxy"]:
+        g_qproxy.labels(
+            name_label, fname, file_date, q["trade_id"], q["request_id"]
+        ).set(q["duration"])
+
+    for p in data["pv01"]:
+        g_pv01.labels(
+            name_label, fname, file_date, p["trade_id"], p["value"], p["request_id"]
+        ).set(p["duration"])
+
+# ----------------- PUSH -----------------
+try:
+    pushadd_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+    print("Metrics pushed successfully")
+except Exception:
+    push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+    print("Metrics pushed (fallback)")
