@@ -1,0 +1,195 @@
+import os
+import re
+from glob import glob
+from datetime import datetime
+from collections import deque
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+LOG_DIR = r"C:\path\to\logs"
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "log_metrics_job"
+
+# ---------------------------------------------------------
+# REGEX DEFINITIONS
+# ---------------------------------------------------------
+
+# Filename pattern: extract name + date
+FILE_REGEX = re.compile(r"(AppFIMLImporter2?|AppFIMLImporter).*__([0-9\-]+)\.log")
+
+# Start event
+found_pattern = re.compile(
+    r"Found\s+MQ\s+Mesaage\s+ID\s*\[Hex\]\s*=\s*\[(.*?)\]",
+    re.IGNORECASE
+)
+
+# End event
+save_pattern = re.compile(
+    r"Save trade \[(.*?)\] complete",
+    re.IGNORECASE
+)
+
+# Failed MQ
+failed_mq_pattern = re.compile(
+    r"Failed MQ Mesaage ID\s*\[Hex\]\s*=\s*\[(.*?)\]",
+    re.IGNORECASE
+)
+
+# Qlroxy duration inside logs
+# Example: "Qlroxy request completed and took 17 seconds"
+qlroxy_pattern = re.compile(
+    r"Qlroxy request completed and took\s*([0-9\.]+)\s*seconds",
+    re.IGNORECASE
+)
+
+# ---------------------------------------------------------
+# Parse all log files
+# ---------------------------------------------------------
+
+file_results = {}
+log_files = glob(os.path.join(LOG_DIR, "AppFIMLImporter*_ProdLon_x64__*.log"))
+
+for log_file in log_files:
+
+    base_file = os.path.basename(log_file)
+
+    # Extract name + date from filename
+    m = FILE_REGEX.search(base_file)
+    if not m:
+        print(f"Skipping file (no match): {base_file}")
+        continue
+
+    name_label = m.group(1)
+    file_date = m.group(2)
+
+    start_queue = deque()
+    trades = []
+    qlroxy_times = []
+
+    mq_count = 0
+    trade_count = 0
+    failed_mq_count = 0
+
+    with open(log_file, "r", errors="ignore") as f:
+        for line in f:
+
+            parts = line.strip().split("|")
+            if len(parts) < 7:
+                continue
+
+            date_str = parts[0].strip()
+            time_str = parts[1].strip()
+            msg = parts[6].strip()
+
+            dt_str = f"{date_str} {time_str}"
+
+            try:
+                ts = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S.%f")
+            except:
+                continue
+
+            # -------- START event --------
+            m1 = found_pattern.search(msg)
+            if m1:
+                msg_id = m1.group(1)
+                start_queue.append((ts, msg_id))
+                mq_count += 1
+                continue
+
+            # -------- FAILED MQ --------
+            if failed_mq_pattern.search(msg):
+                failed_mq_count += 1
+
+            # -------- END event --------
+            m2 = save_pattern.search(msg)
+            if m2:
+                trade_id = m2.group(1)
+                trade_count += 1
+
+                if start_queue:
+                    start_ts, msg_id = start_queue.popleft()
+                    duration = (ts - start_ts).total_seconds()
+
+                    trades.append({
+                        "tradeID": trade_id,
+                        "messageID": msg_id,
+                        "start": start_ts,
+                        "end": ts,
+                        "duration_secs": duration
+                    })
+
+                continue
+
+            # -------- Qlroxy time --------
+            q = qlroxy_pattern.search(msg)
+            if q:
+                qtime = float(q.group(1))
+                qlroxy_times.append(qtime)
+
+    file_results[base_file] = {
+        "name": name_label,
+        "date": file_date,
+        "mq_count": mq_count,
+        "trade_count": trade_count,
+        "failed_mq_count": failed_mq_count,
+        "trades": trades,
+        "qlroxy_times": qlroxy_times
+    }
+
+# ---------------------------------------------------------
+# PUSH TO PROMETHEUS GATEWAY
+# ---------------------------------------------------------
+
+registry = CollectorRegistry()
+labels = ["name", "file_name", "file_date"]
+
+g_mq = Gauge("log_mq_messages_total", "MQ messages found", labels, registry=registry)
+g_trade = Gauge("log_trades_processed_total", "Trades processed", labels, registry=registry)
+g_fail = Gauge("log_failed_mq_messages_total", "Failed MQ messages", labels, registry=registry)
+
+# Per trade duration
+g_trade_dur = Gauge(
+    "log_trade_duration_seconds",
+    "Time taken per trade",
+    ["name", "file_name", "file_date", "trade_id"],
+    registry=registry
+)
+
+# Qlroxy times
+g_qlroxy = Gauge(
+    "log_qlroxy_duration_seconds",
+    "Qlroxy request time",
+    ["name", "file_name", "file_date"],
+    registry=registry
+)
+
+# ---------------------------------------------------------
+# FILL GAUGE VALUES
+# ---------------------------------------------------------
+
+for fname, data in file_results.items():
+
+    name_label = data["name"]
+    fdate = data["date"]
+
+    # File level metrics
+    g_mq.labels(name_label, fname, fdate).set(data["mq_count"])
+    g_trade.labels(name_label, fname, fdate).set(data["trade_count"])
+    g_fail.labels(name_label, fname, fdate).set(data["failed_mq_count"])
+
+    # Qlroxy durations
+    for q in data["qlroxy_times"]:
+        g_qlroxy.labels(name_label, fname, fdate).set(q)
+
+    # Per-trade durations
+    for t in data["trades"]:
+        g_trade_dur.labels(
+            name_label,
+            fname,
+            fdate,
+            t["tradeID"]
+        ).set(t["duration_secs"])
+
+# PUSH ALL
+push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+
+print("Metrics pushed successfully!")
