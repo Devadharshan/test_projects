@@ -1,0 +1,111 @@
+import os
+import re
+import time
+import requests
+
+# ---------------- CONFIG ----------------
+LOG_DIR = "logs"     # directory containing log files
+PUSHGATEWAY_URL = "http://localhost:9091/metrics/job/trade_metrics"
+JOB_NAME = "trade_latency_job"
+
+# ---------------- REGEX PATTERNS ----------------
+
+# Example:
+# 2025-11-20 10:00:00 Trade 12345 START
+START_PATTERN = re.compile(r"(Trade\s+(\d+))\s+START")
+
+# Example:
+# 2025-11-20 10:00:12 Trade 12345 END
+END_PATTERN = re.compile(r"(Trade\s+(\d+))\s+END")
+
+# QProxy line example:
+# Received RequestManagerCall response from QProxy for Requestid 12345 in 2.345 seconds
+QPROXY_PATTERN = re.compile(
+    r"Requestid\s+(\d+)\s+in\s+([\d\.]+)\s*seconds",
+    re.IGNORECASE
+)
+
+# Timestamp (assuming pattern like 2025-11-20 10:05:22)
+TIMESTAMP_PATTERN = re.compile(
+    r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})"
+)
+
+def parse_timestamp(line):
+    """Extract and convert timestamp to epoch seconds."""
+    m = TIMESTAMP_PATTERN.search(line)
+    if not m:
+        return None
+    dt = time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+    return time.mktime(dt)
+
+def push_to_gateway(metrics_text):
+    """Push metrics to Prometheus Pushgateway."""
+    try:
+        resp = requests.post(PUSHGATEWAY_URL, data=metrics_text.encode("utf-8"))
+        print("PUSHGATEWAY:", resp.status_code)
+    except Exception as e:
+        print("Error pushing:", e)
+
+def process_logs():
+
+    trades = {}     # {trade_id: {"start": ts, "end": ts, "qproxy": value}}
+    metrics = []    # Collect final lines
+
+    # -------- READ ALL FILES IN DIRECTORY --------
+    for filename in os.listdir(LOG_DIR):
+        filepath = os.path.join(LOG_DIR, filename)
+
+        if not os.path.isfile(filepath):
+            continue
+
+        with open(filepath, "r", errors="ignore") as f:
+            for line in f:
+
+                ts = parse_timestamp(line)
+
+                # ---------------- START ----------------
+                m = START_PATTERN.search(line)
+                if m and ts:
+                    trade_id = m.group(2)
+                    trades.setdefault(trade_id, {})["start"] = ts
+
+                # ---------------- END ----------------
+                m = END_PATTERN.search(line)
+                if m and ts:
+                    trade_id = m.group(2)
+                    trades.setdefault(trade_id, {})["end"] = ts
+
+                # ---------------- QPROXY ----------------
+                m = QPROXY_PATTERN.search(line)
+                if m:
+                    request_id = m.group(1)
+                    seconds = float(m.group(2))
+                    trades.setdefault(request_id, {})["qproxy"] = seconds
+
+    # ------------ CALCULATE AND WRITE METRICS ------------
+    for trade_id, data in trades.items():
+
+        # START–END DURATION
+        if "start" in data and "end" in data:
+            duration = data["end"] - data["start"]
+            metrics.append(
+                f'trade_time_seconds{{trade_id="{trade_id}"}} {duration}'
+            )
+
+        # QProxy duration
+        if "qproxy" in data:
+            metrics.append(
+                f'qproxy_time_seconds{{trade_id="{trade_id}"}} {data["qproxy"]}'
+            )
+
+    # Combine all metrics
+    full_text = "\n".join(metrics) + "\n"
+
+    print("=== METRICS SENT ===")
+    print(full_text)
+
+    push_to_gateway(full_text)
+
+
+if __name__ == "__main__":
+    process_logs()
