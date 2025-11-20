@@ -1,0 +1,130 @@
+import os
+import re
+import requests
+from datetime import datetime, timedelta
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# -------------------------------
+# CONFIG
+# -------------------------------
+LOG_DIR = "./logs"              # directory containing all log files
+PUSHGATEWAY = "http://localhost:9091"
+JOB_NAME = "trade_metrics"
+
+# Regex patterns
+START_PATTERN = r"Start Trade\s+(\d+)\s+Time:\s+(\d{4}-\d{2}-\d{2}\|\d{2}:\d{2}:\d{2}\.\d+)"
+END_PATTERN   = r"End Trade\s+(\d+)\s+Time:\s+(\d{4}-\d{2}-\d{2}\|\d{2}:\d{2}:\d{2}\.\d+)"
+QLROXY_REGEX  = r"Qlroxy request completed and took ([0-9]*\.?[0-9]+) seconds"
+
+MQ_TOTAL_PATTERN  = r"Received MQ message"
+MQ_FAILED_PATTERN = r"MQ message processing failed"
+
+# -------------------------------
+# TIME CALCULATION HELPERS
+# -------------------------------
+def parse_timestamp(ts):
+    """Convert 'YYYY-MM-DD|HH:MM:SS.mmm' to datetime."""
+    return datetime.strptime(ts, "%Y-%m-%d|%H:%M:%S.%f")
+
+def calculate_trade_time(start_ts, end_ts):
+    """Return total time in seconds."""
+    start = parse_timestamp(start_ts)
+    end = parse_timestamp(end_ts)
+    return (end - start).total_seconds()
+
+def extract_qlroxy_time(line):
+    """Extract Qlroxy duration in seconds."""
+    m = re.search(QLROXY_REGEX, line)
+    return float(m.group(1)) if m else None
+
+# -------------------------------
+# PROCESS ALL LOG FILES
+# -------------------------------
+registry = CollectorRegistry()
+
+g_total_trades = Gauge("total_trades", "Total trades processed", ["date", "file"], registry=registry)
+g_avg_trade_time = Gauge("avg_trade_time_seconds", "Average trade time", ["date", "file"], registry=registry)
+g_qlroxy_time = Gauge("qlroxy_time_seconds", "Qlroxy processing time", ["trade_id", "date", "file"], registry=registry)
+
+g_mq_total = Gauge("mq_total_messages", "Total MQ messages", ["date", "file"], registry=registry)
+g_mq_failed = Gauge("mq_failed_messages", "Failed MQ messages", ["date", "file"], registry=registry)
+
+for filename in os.listdir(LOG_DIR):
+    if not filename.endswith(".log"):
+        continue
+
+    file_path = os.path.join(LOG_DIR, filename)
+
+    # Extract file label: AppFIMLImporter or AppFIMLImporter2
+    file_label = filename.replace(".log", "")
+    if "Importer2" in file_label:
+        file_label = "AppFIMLImporter2"
+    else:
+        file_label = "AppFIMLImporter"
+
+    # Extract date from filename (assuming filename contains date like 2025-11-18)
+    date_match = re.search(r"\d{4}-\d{2}-\d{2}", filename)
+    date_label = date_match.group(0) if date_match else "unknown"
+
+    start_times = {}
+    end_times = {}
+    qlroxy_times = []
+    mq_total = 0
+    mq_failed = 0
+
+    with open(file_path, "r") as f:
+        for line in f:
+            line = line.strip()
+
+            # MQ message counts
+            if re.search(MQ_TOTAL_PATTERN, line):
+                mq_total += 1
+            if re.search(MQ_FAILED_PATTERN, line):
+                mq_failed += 1
+
+            # Start trade
+            m = re.search(START_PATTERN, line)
+            if m:
+                trade_id = m.group(1)
+                ts = m.group(2)
+                start_times[trade_id] = ts
+
+            # End trade
+            m = re.search(END_PATTERN, line)
+            if m:
+                trade_id = m.group(1)
+                ts = m.group(2)
+                end_times[trade_id] = ts
+
+            # Qlroxy time
+            q_time = extract_qlroxy_time(line)
+            if q_time:
+                qlroxy_times.append(q_time)
+
+    # Calculate trade durations
+    trade_durations = []
+    for trade_id in start_times:
+        if trade_id in end_times:
+            sec = calculate_trade_time(start_times[trade_id], end_times[trade_id])
+            trade_durations.append(sec)
+
+            # Push Qlroxy for each trade
+            for q in qlroxy_times:
+                g_qlroxy_time.labels(trade_id, date_label, file_label).set(q)
+
+    # Push total trades
+    g_total_trades.labels(date_label, file_label).set(len(trade_durations))
+
+    # Push average trade time
+    if trade_durations:
+        avg_sec = sum(trade_durations) / len(trade_durations)
+        g_avg_trade_time.labels(date_label, file_label).set(avg_sec)
+
+    # Push MQ metrics
+    g_mq_total.labels(date_label, file_label).set(mq_total)
+    g_mq_failed.labels(date_label, file_label).set(mq_failed)
+
+# Finally push all metrics in one job
+push_to_gateway(PUSHGATEWAY, job=JOB_NAME, registry=registry)
+
+print("✔ All metrics pushed to Pushgateway successfully")
