@@ -1,0 +1,265 @@
+import os
+import re
+from glob import glob
+from datetime import datetime
+from collections import deque
+import csv
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway, pushadd_to_gateway
+
+# ----------------- CONFIG -----------------
+LOG_DIR = r"C:\path\to\logs"               # <-- update
+PUSHGATEWAY_URL = "http://localhost:9091"  # <-- update if needed
+JOB_NAME = "log_metrics_job"
+
+DEBUG = True         # set True to get verbose pairing logs
+MAX_WARN = 3600      # warn if duration > this (seconds)
+DEBUG_CSV = "trade_durations_debug.csv"  # output for manual inspection
+
+# ----------------- REGEX -----------------
+pretrade_pattern = re.compile(r"Saved\s+Focus\s+trade\s+(\d+)\s+from\s+pretrade", re.IGNORECASE)
+start_pattern = re.compile(r"Found\s+MQ\s+Message\s+ID\s*\[Hex\]\s*=\s*\[(.*?)\]", re.IGNORECASE)
+end_pattern = re.compile(r"Save trade \[(.*?)\] complete", re.IGNORECASE)
+failed_mq_pattern = re.compile(r"Failed\s+to\s+Find\s+MQ\s+Message\s+ID\s*\[Hex\]\s*=\s*\[.*?\]", re.IGNORECASE)
+qproxy_request_pattern = re.compile(r"Received\s+RequestManagerCall\s+response\s+from\s+QProxy\s+for\s+Requestid\s+(\d+)\s+in\s+([\d.]+)\s*s", re.IGNORECASE)
+pv01_pattern = re.compile(r"Received\s+PV01\s+response\s+from\s+QProxy\s+for\s+(\d+)\s+with\s+Request\s+Id\s+(\d+)\s+in\s+([\d.]+)\s*s", re.IGNORECASE)
+file_regex = re.compile(r"^(AppFIMLImporter\d*)_.*__([\d\-]+)\.log$")
+
+# ----------------- HELPERS -----------------
+def parse_line_ts(parts):
+    """
+    Robust timestamp parser:
+      1) try parts[0] + " " + parts[1]
+      2) try parts[2] if it looks like a full timestamp
+      3) scan each part for a full timestamp "YYYY-MM-DD HH:MM:SS.sss"
+    Returns datetime or None.
+    """
+    # helper to try parse
+    def try_parse(s):
+        try:
+            return datetime.strptime(s.strip(), "%Y-%m-%d %H:%M:%S.%f")
+        except Exception:
+            return None
+
+    if len(parts) >= 2:
+        dt = try_parse(parts[0] + " " + parts[1])
+        if dt:
+            return dt
+
+    # sometimes logs include full timestamp again in another field; try common candidates
+    for idx in (2, 3, 4):
+        if len(parts) > idx:
+            dt = try_parse(parts[idx])
+            if dt:
+                return dt
+
+    # fallback: scan all parts
+    for p in parts:
+        dt = try_parse(p)
+        if dt:
+            return dt
+
+    return None
+
+def extract_name_from_filename(base):
+    m = file_regex.match(base)
+    if m:
+        return m.group(1), m.group(2)
+    return None, None
+
+# ----------------- PROCESS FILES -----------------
+file_results = {}
+log_files = glob(os.path.join(LOG_DIR, "AppFIMLImporter*_ProdLon_x64__*.log"))
+
+# prepare debug CSV writer
+csv_fh = open(DEBUG_CSV, "w", newline="", encoding="utf-8")
+csv_writer = csv.writer(csv_fh)
+csv_writer.writerow(["file", "trade_id", "message_id", "start_ts", "end_ts", "duration_secs", "status", "note"])
+
+# diagnostic counters
+skipped_no_start = 0
+negative_duration_count = 0
+
+for log_file in log_files:
+    base = os.path.basename(log_file)
+    name_label, file_date = extract_name_from_filename(base)
+    if not name_label:
+        if DEBUG:
+            print("Skipping file (name/date not matched):", base)
+        continue
+
+    # start_stack holds frames assigned to pretrade (FIFO pretrade → first following start assigned)
+    start_stack = []  # list of frames: {"start_ts", "msg_id", "trade_id", "qproxy", "pv01"}
+    pending_pretrades = deque()
+
+    trades = []
+    qproxy_calls = []
+    pv01_calls = []
+
+    mq_total = 0
+    mq_failed = 0
+
+    with open(log_file, "r", errors="ignore") as fh:
+        for raw in fh:
+            line = raw.rstrip("\n")
+            parts = line.split("|")
+            ts = parse_line_ts(parts)
+            if ts is None:
+                # skip but optionally debug
+                if DEBUG and "Found MQ" in line or "Save trade" in line:
+                    print(f"[DEBUG] Could not parse timestamp for line in {base}: {line}")
+                continue
+
+            msg = parts[6].strip() if len(parts) >= 7 else ""
+
+            # PRETRADE
+            m = pretrade_pattern.search(msg)
+            if m:
+                tid = m.group(1)
+                if tid not in pending_pretrades and not any(f["trade_id"] == tid for f in start_stack):
+                    pending_pretrades.append(tid)
+                continue
+
+            # START
+            m = start_pattern.search(msg)
+            if m:
+                mq_total += 1
+                msg_id = m.group(1)
+                # assign a start frame only if we have pending pretrade
+                if pending_pretrades:
+                    assigned_tid = pending_pretrades.popleft()
+                    frame = {"start_ts": ts, "msg_id": msg_id, "trade_id": assigned_tid, "qproxy": [], "pv01": []}
+                    start_stack.append(frame)
+                    if DEBUG:
+                        print(f"[DEBUG] START assigned file={base} trade={assigned_tid} msgid={msg_id} start={ts}")
+                else:
+                    # no pending pretrade — ignore start to avoid using old hex
+                    if DEBUG:
+                        print(f"[DEBUG] START ignored (no pending pretrade) file={base} msgid={msg_id} start={ts}")
+                continue
+
+            # FAILED MQ
+            if failed_mq_pattern.search(msg):
+                mq_failed += 1
+
+            # QPROXY
+            m = qproxy_request_pattern.search(msg)
+            if m:
+                req_id = m.group(1)
+                dur = float(m.group(2))
+                if start_stack:
+                    start_stack[-1]["qproxy"].append({"request_id": req_id, "duration": dur})
+                else:
+                    qproxy_calls.append({"trade_id": None, "request_id": req_id, "duration": dur})
+                continue
+
+            # PV01
+            m = pv01_pattern.search(msg)
+            if m:
+                value = m.group(1)
+                req_id = m.group(2)
+                dur = float(m.group(3))
+                if start_stack:
+                    start_stack[-1]["pv01"].append({"value": value, "request_id": req_id, "duration": dur})
+                else:
+                    pv01_calls.append({"trade_id": None, "value": value, "request_id": req_id, "duration": dur})
+                continue
+
+            # END
+            m = end_pattern.search(msg)
+            if m:
+                tid = m.group(1)
+
+                # prefer frame already assigned to this trade_id
+                matched_idx = None
+                for i in range(len(start_stack)-1, -1, -1):
+                    if start_stack[i]["trade_id"] == tid:
+                        matched_idx = i
+                        break
+
+                # if none, don't pick an unassigned/old start (we intentionally avoid matching old starts)
+                if matched_idx is None:
+                    # record a skipped row for debug CSV
+                    csv_writer.writerow([base, tid, "", "", ts.isoformat(), "", "skipped_no_start", "no assigned start frame"])
+                    skipped_no_start += 1
+                    if DEBUG:
+                        print(f"[WARN] No assigned start frame for END trade {tid} at {ts} in {base}; skipping")
+                    # cleanup pending_pretrades if present
+                    try:
+                        if pending_pretrades and pending_pretrades[0] == tid:
+                            pending_pretrades.popleft()
+                    except Exception:
+                        pass
+                    continue
+
+                frame = start_stack.pop(matched_idx)
+                start_ts = frame["start_ts"]
+                msg_id = frame["msg_id"]
+                duration = (ts - start_ts).total_seconds()
+
+                if duration < 0:
+                    negative_duration_count += 1
+                    csv_writer.writerow([base, tid, msg_id, start_ts.isoformat(), ts.isoformat(), duration, "negative", "end before start"])
+                    if DEBUG:
+                        print(f"[WARN] Negative duration for trade {tid} in {base}: {duration} (start {start_ts} end {ts})")
+                    continue
+
+                if duration > MAX_WARN:
+                    print(f"[WARN] Large trade time {duration:.3f}s for trade {tid} in {base} (start {start_ts} end {ts})")
+
+                # add to trades
+                trades.append({"trade_id": tid, "message_id": msg_id, "start": start_ts, "end": ts, "duration": duration})
+                csv_writer.writerow([base, tid, msg_id, start_ts.isoformat(), ts.isoformat(), duration, "ok", "matched"])
+                if DEBUG:
+                    print(f"[DEBUG] COMPLETED trade={tid} file={base} msgid={msg_id} start={start_ts} end={ts} dur={duration:.3f}s")
+
+                # flush attached qproxy/pv01 to file-level lists
+                for q in frame["qproxy"]:
+                    qproxy_calls.append({"trade_id": tid, "request_id": q["request_id"], "duration": q["duration"]})
+                for p in frame["pv01"]:
+                    pv01_calls.append({"trade_id": tid, "value": p["value"], "request_id": p["request_id"], "duration": p["duration"]})
+                continue
+
+    file_results[base] = {"name": name_label, "file_date": file_date, "mq_total": mq_total, "mq_failed": mq_failed, "trades": trades, "qproxy": qproxy_calls, "pv01": pv01_calls}
+
+# close CSV
+csv_fh.close()
+
+# ----------------- METRICS -----------------
+registry = CollectorRegistry()
+labels = ["name", "file_name", "file_date"]
+
+g_mq_total = Gauge("log_mq_messages_total", "Total MQ messages", labels, registry=registry)
+g_mq_failed = Gauge("log_failed_mq_messages_total", "Total failed MQ messages", labels, registry=registry)
+g_trades_processed_total = Gauge("log_trades_processed_total", "Total trades processed", ["name", "file_name", "file_date"], registry=registry)
+g_trade_duration = Gauge("log_trade_duration_seconds", "Duration between MQ found and Save trade", ["name", "file_name", "file_date", "trade_id", "message_id"], registry=registry)
+g_qproxy = Gauge("log_qproxy_request_time_seconds", "QProxy RequestManagerCall time", ["name", "file_name", "file_date", "trade_id", "request_id"], registry=registry)
+g_pv01 = Gauge("log_qproxy_pv01_time_seconds", "QProxy PV01 time", ["name", "file_name", "file_date", "trade_id", "value", "request_id"], registry=registry)
+
+# diagnostic gauges
+g_skipped_no_start = Gauge("log_trade_skipped_no_start_total", "Trades skipped due to no assigned start frame", labels, registry=registry)
+g_negative_durations = Gauge("log_trade_negative_duration_total", "Trades with negative duration detected", labels, registry=registry)
+
+# ----------------- FILL METRICS -----------------
+for fname, data in file_results.items():
+    name_label = data["name"]
+    file_date = data["file_date"]
+    g_mq_total.labels(name_label, fname, file_date).set(data["mq_total"])
+    g_mq_failed.labels(name_label, fname, file_date).set(data["mq_failed"])
+    g_trades_processed_total.labels(name_label, fname, file_date).set(len(data["trades"]))
+    g_skipped_no_start.labels(name_label, fname, file_date).set(skipped_no_start)
+    g_negative_durations.labels(name_label, fname, file_date).set(negative_duration_count)
+
+    for t in data["trades"]:
+        g_trade_duration.labels(name_label, fname, file_date, t["trade_id"], t["message_id"]).set(t["duration"])
+    for q in data["qproxy"]:
+        g_qproxy.labels(name_label, fname, file_date, q["trade_id"], q["request_id"]).set(q["duration"])
+    for p in data["pv01"]:
+        g_pv01.labels(name_label, fname, file_date, p["trade_id"], p["value"], p["request_id"]).set(p["duration"])
+
+# ----------------- PUSH -----------------
+try:
+    pushadd_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+    print("Metrics pushed successfully")
+except Exception:
+    push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+    print("Metrics pushed (fallback)")
