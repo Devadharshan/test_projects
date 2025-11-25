@@ -1,0 +1,5 @@
+New-Service -Name "Grafana" `
+  -BinaryPathName '"C:\Program Files\Grafana\bin\grafana-server.exe" --config "C:\Program Files\Grafana\conf\default.ini"' `
+  -DisplayName "Grafana" `
+  -Description "Grafana Monitoring Server" `
+  -StartupType Automatic
