@@ -1,0 +1,113 @@
+import os
+import json
+import socket
+import logging
+from datetime import datetime, timedelta
+import shutil
+
+# -------------------------------------------------------------
+# CONFIG – NOT in JSON
+# -------------------------------------------------------------
+LOG_DIR = "C:/cleanup_logs"  
+os.makedirs(LOG_DIR, exist_ok=True)
+
+# Create log file with datetime
+log_filename = datetime.now().strftime("cleanup_%Y%m%d_%H%M%S.log")
+log_path = os.path.join(LOG_DIR, log_filename)
+
+# Logging setup
+logging.basicConfig(
+    filename=log_path,
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+logging.info("----- Cleanup Script Started -----")
+
+# -------------------------------------------------------------
+# Load JSON
+# -------------------------------------------------------------
+CONFIG_FILE = "servers.json"
+
+with open(CONFIG_FILE, "r") as f:
+    config = json.load(f)
+
+current_server = socket.gethostname()
+logging.info(f"Current server detected: {current_server}")
+
+
+# -------------------------------------------------------------
+# Check disk space
+# -------------------------------------------------------------
+def get_disk_space(path):
+    total, used, free = shutil.disk_usage(path)
+    return total, used, free
+
+
+# -------------------------------------------------------------
+# Delete old files
+# -------------------------------------------------------------
+def delete_old_files(path, extensions, days):
+
+    cutoff_date = datetime.now() - timedelta(days=days)
+    deleted_files = 0
+
+    # SPACE BEFORE DELETION
+    total_before, used_before, free_before = get_disk_space(path)
+
+    logging.info(
+        f"Disk space BEFORE deletion - Total: {total_before}, Used: {used_before}, Free: {free_before}"
+    )
+
+    # Walk directory recursively
+    for root, dirs, files in os.walk(path):
+        for file in files:
+            if not any(file.endswith(ext) for ext in extensions):
+                continue
+
+            file_path = os.path.join(root, file)
+            file_mtime = datetime.fromtimestamp(os.path.getmtime(file_path))
+
+            if file_mtime < cutoff_date:
+                try:
+                    os.remove(file_path)
+                    deleted_files += 1
+                    logging.info(f"Deleted: {file_path}")
+                except Exception as e:
+                    logging.error(f"Error deleting {file_path}: {e}")
+
+    # SPACE AFTER DELETION
+    total_after, used_after, free_after = get_disk_space(path)
+
+    logging.info(
+        f"Disk space AFTER deletion - Total: {total_after}, Used: {used_after}, Free: {free_after}"
+    )
+
+    freed_space = free_after - free_before
+    logging.info(f"Total files deleted: {deleted_files}")
+    logging.info(f"Space freed: {freed_space} bytes")
+
+    return deleted_files
+
+
+# -------------------------------------------------------------
+# Process matching server
+# -------------------------------------------------------------
+for server in config["servers"]:
+    if server["server_name"].lower() == current_server.lower():
+        logging.info(f"Matched server config: {server['server_name']}")
+
+        extensions = server["extensions"]
+        days = server["days"]
+
+        for path in server["paths"]:
+            normalized_path = os.path.normpath(path)
+
+            logging.info(f"Processing Path: {normalized_path}")
+            deleted = delete_old_files(normalized_path, extensions, days)
+
+        break
+else:
+    logging.warning("No matching server config found in JSON.")
+
+logging.info("----- Cleanup Script Completed -----")
