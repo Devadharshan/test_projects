@@ -1,3 +1,90 @@
+import os
+import json
+import socket
+from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
+
+CONFIG_FILE = r"C:\cleanup\config.json"
+
+
+def load_config():
+    with open(CONFIG_FILE, "r") as f:
+        return json.load(f)
+
+
+def get_matching_server(config):
+    hostname = socket.gethostname().strip().lower()
+    print(f"[INFO] Actual server hostname: {hostname}")
+
+    for srv in config["servers"]:
+        if srv["server_name"].strip().lower() == hostname:
+            print(f"[INFO] Matching config found for: {srv['server_name']}")
+            return srv
+
+    return None
+
+
+def should_delete(file_path, extensions, cutoff_time):
+    _, ext = os.path.splitext(file_path)
+    if ext.lower() not in extensions:
+        return False
+
+    mtime = datetime.fromtimestamp(os.path.getmtime(file_path))
+    return mtime < cutoff_time
+
+
+def delete_file(file_path):
+    try:
+        os.remove(file_path)
+        print(f"[DELETED] {file_path}")
+    except Exception as e:
+        print(f"[ERROR] {file_path}: {e}")
+
+
+def scan_and_delete(path, extensions, cutoff_time):
+    for root, dirs, files in os.walk(path):
+        for file_name in files:
+            full_path = os.path.join(root, file_name)
+            if should_delete(full_path, extensions, cutoff_time):
+                delete_file(full_path)
+
+
+def main():
+    config = load_config()
+
+    server_config = get_matching_server(config)
+    if not server_config:
+        print("[SKIPPED] No matching server config found in JSON. Exiting safely.")
+        return
+
+    paths = server_config["paths"]
+    extensions = [e.lower() for e in server_config["extensions"]]
+    days = server_config["days"]
+
+    print(f"\n[START] Cleanup begins for server: {server_config['server_name']}\n")
+
+    cutoff_time = datetime.now() - timedelta(days=days)
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        for path in paths:
+            if os.path.exists(path):
+                executor.submit(scan_and_delete, path, extensions, cutoff_time)
+            else:
+                print(f"[WARNING] Path not found: {path}")
+
+
+if __name__ == "__main__":
+    main()
+    
+    
+    
+    
+
+
+
+
+
+
 import json
 import pandas as pd
 import random
