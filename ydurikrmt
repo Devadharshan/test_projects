@@ -1,0 +1,75 @@
+import os
+import json
+import socket
+from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
+
+CONFIG_FILE = r"C:\cleanup\config.json"
+
+
+def load_config():
+    with open(CONFIG_FILE, "r") as f:
+        return json.load(f)
+
+
+def is_correct_server(expected_server):
+    actual_server = socket.gethostname()
+    print(f"[INFO] Expected server (JSON): {expected_server}")
+    print(f"[INFO] Actual server (socket): {actual_server}")
+
+    return actual_server.strip().lower() == expected_server.strip().lower()
+
+
+def should_delete(file_path, extensions, cutoff_time):
+    _, ext = os.path.splitext(file_path)
+    if ext.lower() not in extensions:
+        return False
+
+    mtime = datetime.fromtimestamp(os.path.getmtime(file_path))
+    return mtime < cutoff_time
+
+
+def delete_file(file_path):
+    try:
+        os.remove(file_path)
+        print(f"[DELETED] {file_path}")
+    except Exception as e:
+        print(f"[ERROR] {file_path}: {e}")
+
+
+def scan_and_delete(path, extensions, cutoff_time):
+    for root, dirs, files in os.walk(path):
+        for f in files:
+            full_path = os.path.join(root, f)
+            if should_delete(full_path, extensions, cutoff_time):
+                delete_file(full_path)
+
+
+def main():
+    config = load_config()
+
+    expected = config["server_name"]
+
+    # --- Strict validation ---
+    if not is_correct_server(expected):
+        print("[SKIPPED] Server name mismatch. Cleanup will NOT run.")
+        return
+
+    paths = config["paths"]
+    extensions = [e.lower() for e in config["extensions"]]
+    days = config["days"]
+
+    print(f"\n[START] Cleanup executing...\n")
+
+    cutoff_time = datetime.now() - timedelta(days=days)
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        for p in paths:
+            if os.path.exists(p):
+                executor.submit(scan_and_delete, p, extensions, cutoff_time)
+            else:
+                print(f"[WARNING] Path not found: {p}")
+
+
+if __name__ == "__main__":
+    main()
