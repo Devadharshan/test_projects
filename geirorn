@@ -1,0 +1,27 @@
+filebeat.inputs:
+  - type: filestream
+    id: app-logs
+    enabled: true
+    paths:
+      - "C:/logs/*.log"
+
+    # Parse your pipe-separated logs
+    fields:
+      log_type: app
+    fields_under_root: true
+
+    processors:
+      - dissect:
+          tokenizer: "%{date}|%{time}|%{thread}|%{code}|%{empty}|%{source}|%{message}"
+          field: "message"
+          target_prefix: "parsed"
+      - timestamp:
+          field: "parsed.date"
+          layouts:
+            - "2006-01-02"
+          timezone: "Local"
+
+output.elasticsearch:
+  hosts: ["http://localhost:9200"]
+  username: "elastic"
+  password: "YOURPASSWORD"
