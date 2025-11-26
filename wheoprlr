@@ -1,0 +1,55 @@
+filebeat.inputs:
+  - type: filestream
+    id: app-logs
+    enabled: true
+    paths:
+      - "C:/logs/*.log"
+
+    fields_under_root: true
+    fields:
+      log_type: app
+
+    processors:
+      # -------------------------------
+      # 1. Clean spaces around "|"
+      # -------------------------------
+      - script:
+          lang: javascript
+          id: clean_spaces
+          source: >
+            function process(event) {
+              var msg = event.Get("message");
+              if (msg) {
+                // remove ALL spaces around separators
+                msg = msg.replace(/\s*\|\s*/g, "|");
+                event.Put("message", msg);
+              }
+            }
+
+      # -------------------------------
+      # 2. Parse fields using dissect
+      # -------------------------------
+      - dissect:
+          tokenizer: "%{date}|%{time}|%{thread}|%{code}|%{empty}|%{source}|%{message}"
+          field: "message"
+          target_prefix: "parsed"
+
+      # Trim whitespace in parsed fields
+      - drop_fields:
+          fields: ["empty"]
+
+# -------------------------------
+# Output to Elasticsearch
+# -------------------------------
+output.elasticsearch:
+  hosts: ["http://localhost:9200"]
+  username: "elastic"
+  password: "YOUR_PASSWORD_HERE"
+
+# Logging (optional)
+logging.level: info
+logging.to_files: true
+logging.files:
+  path: C:/filebeat-logs
+  name: filebeat
+  keepfiles: 7
