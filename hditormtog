@@ -1,0 +1,61 @@
+import time
+import random
+import os
+from datetime import datetime
+
+# ------------------ CONFIG ------------------
+LOG_DIR = r"C:\mylogs"      # <-- change to your directory
+LOG_FILE = "app.log"
+# --------------------------------------------
+
+messages = [
+    "Thread alive",
+    "Reading config file",
+    "Saving trade to database",
+    "Processing incoming message",
+    "Request completed",
+    "Waiting for next event"
+]
+
+sources = [
+    "LogConverter",
+    "TradeService",
+    "ConfigLoader",
+    "MessageProcessor"
+]
+
+threads = ["WT6", "WT7"]
+
+# Make sure directory exists
+os.makedirs(LOG_DIR, exist_ok=True)
+
+def write_log():
+    log_path = os.path.join(LOG_DIR, LOG_FILE)
+
+    # Write header only if file is empty/new
+    if not os.path.exists(log_path) or os.path.getsize(log_path) == 0:
+        with open(log_path, "w") as f:
+            f.write("Date | Time | Thrd | Thd | L | Source | Message\n")
+            f.write("---- | ---- | ---- | ---- | - | ------ | -------\n")
+
+    with open(log_path, "a") as f:
+        while True:
+            now = datetime.now()
+            date_str = now.strftime("%Y-%m-%d")
+            time_str = now.strftime("%H:%M:%S.%f")[:-3]
+
+            thrd = random.randint(100, 999)
+            thd = random.choice(threads)
+            level = ""     # empty as requested
+            source = random.choice(sources)
+            msg = random.choice(messages)
+
+            log_line = f"{date_str}|{time_str}| {thrd}|{thd}| {level}|{source} |{msg}\n"
+            f.write(log_line)
+            print(log_line.strip())
+
+            time.sleep(1)
+
+
+if __name__ == "__main__":
+    write_log()
