@@ -1,0 +1,46 @@
+import time
+import random
+from datetime import datetime
+
+LOG_FILE = "app.log"
+
+messages = [
+    "Thread alive",
+    "Reading config file",
+    "Saving trade to database",
+    "Processing incoming message",
+    "Request completed",
+    "Waiting for next event"
+]
+
+sources = [
+    "LogConverter",
+    "TradeService",
+    "ConfigLoader",
+    "MessageProcessor"
+]
+
+threads = ["WT6", "WT7"]
+
+def write_log():
+    with open(LOG_FILE, "a") as f:
+        while True:
+            now = datetime.now()
+            date_str = now.strftime("%Y-%m-%d")
+            time_str = now.strftime("%H:%M:%S.%f")[:-3]
+
+            thrd = random.randint(100, 999)
+            thd = random.choice(threads)
+            level = ""     # you said keep empty
+            source = random.choice(sources)
+            msg = random.choice(messages)
+
+            log_line = f"{date_str}|{time_str}| {thrd}|{thd}| {level}|{source} |{msg}\n"
+            f.write(log_line)
+            print(log_line.strip())
+
+            time.sleep(1)   # write every 1 second
+
+
+if __name__ == "__main__":
+    write_log()
