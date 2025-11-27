@@ -1,0 +1,98 @@
+input {
+  beats {
+    port => 5044
+  }
+}
+
+filter {
+
+  # ----------- PARSE LOG LINE INTO FIELDS -----------
+  dissect {
+    mapping => {
+      "message" => "%{date}|%{time}|%{t1}|%{t2}|%{level}|%{source}|%{msg}"
+    }
+    add_tag => ["parsed"]
+  }
+
+  mutate {
+    add_field => {
+      "log_ts" => "%{date} %{time}"
+    }
+  }
+
+  date {
+    match => ["log_ts", "yyyy-MM-dd HH:mm:ss.SSS"]
+    target => "@timestamp"
+  }
+
+  # ----------- DETECT EVENT TYPES -----------
+
+  if [msg] =~ /Saved\s+Focus\s+trade\s+(\d+)\s+from\s+pretrade/i {
+    grok {
+      match => { "msg" => "Saved Focus trade %{NUMBER:trade_id} from pretrade" }
+    }
+    mutate { add_tag => ["pretrade"] }
+  }
+
+  else if [msg] =~ /Found MQ Message ID \[Hex\] = \[(.+)\]/i {
+    grok {
+      match => { "msg" => "Found MQ Message ID \\[Hex\\] = \\[%{DATA:msg_id}\\]" }
+    }
+    mutate { add_tag => ["trade_start"] }
+  }
+
+  else if [msg] =~ /Save trade \[(.+?)\] complete/i {
+    grok {
+      match => { "msg" => "Save trade \\[%{NUMBER:trade_id}\\] complete" }
+    }
+    mutate { add_tag => ["trade_end"] }
+  }
+
+  # ----------- AGGREGATION FOR START → END -----------
+
+  # Aggregator ID is trade_id
+  if "trade_start" in [tags] {
+    aggregate {
+      task_id => "%{trade_id}"
+      code => "
+        map['start_time'] = event.get('@timestamp');
+        map['msg_id'] = event.get('msg_id');
+      "
+      map_action => "create"
+      timeout => 600
+    }
+  }
+
+  if "trade_end" in [tags] {
+    aggregate {
+      task_id => "%{trade_id}"
+      code => "
+        if (map['start_time']) {
+          duration = event.get('@timestamp').toInstant().toEpochMilli() - map['start_time'].toInstant().toEpochMilli();
+          event.set('duration_ms', duration);
+          event.set('message_id', map['msg_id']);
+        } else {
+          event.set('duration_ms', -1);
+        }
+        map.clear();
+      "
+      map_action => "update"
+      timeout => 600
+      end_of_task => true
+    }
+  }
+
+}
+
+output {
+  elasticsearch {
+    hosts => ["http://localhost:9200"]
+    user => "elastic"
+    password => "YourPasswordHere"
+    index => "fiml-logs-%{+YYYY.MM.dd}"
+  }
+
+  stdout {
+    codec => rubydebug
+  }
+}
