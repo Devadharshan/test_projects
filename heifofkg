@@ -1,0 +1,15 @@
+filebeat.inputs:
+  - type: filestream
+    id: bp_logs
+    enabled: true
+    paths:
+      - "C:/logs/bp/*.log"     # <-- your log directory
+    parsers:
+      - multiline:
+          type: pattern
+          pattern: '^\d{4}-\d{2}-\d{2}\|'   # A new log always starts with Date|
+          negate: true
+          match: after
+
+output.logstash:
+  hosts: ["localhost:5044"]
