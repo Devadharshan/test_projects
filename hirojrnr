@@ -1,0 +1,50 @@
+input {
+  beats {
+    port => 5044
+  }
+}
+
+filter {
+  
+  grok {
+    match => {
+      "message" => [
+        # Start Msg
+        '%{DATE:log_date}\|%{TIME:log_time}\|.*Found MQ Message ID \[Hex\] = \[%{DATA:hex_id}\]',
+
+        # End Msg
+        '%{DATE:log_date}\|%{TIME:log_time}\|.*Save trade %{DATA:trade_id} complete',
+
+        # Failed Msg
+        '%{DATE:log_date}\|%{TIME:log_time}\|.*Failed to Find MQ Message ID \[Hex\] = \[%{DATA:hex_id}\]',
+
+        # Pretrade Msg
+        '%{DATE:log_date}\|%{TIME:log_time}\|.*Saved Focus trade %{DATA:trade_id} from pretrade %{DATA:pretrade_id}'
+      ]
+    }
+  }
+
+  # Convert the date + time into proper @timestamp
+  mutate {
+    add_field => {
+      "log_ts" => "%{log_date} %{log_time}"
+    }
+  }
+
+  date {
+    match => ["log_ts", "yyyy-MM-dd HH:mm:ss.SSS"]
+    timezone => "Asia/Kolkata"
+  }
+
+}
+
+output {
+  elasticsearch {
+    hosts => ["http://localhost:9200"]
+    index => "bp-logs-%{+YYYY.MM.dd}"
+    user => "elastic"
+    password => "your_password"
+  }
+
+  stdout { codec => rubydebug }
+}
