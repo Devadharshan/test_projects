@@ -1,0 +1,200 @@
+import os
+import re
+import time
+from glob import glob
+from datetime import datetime
+from collections import deque
+from prometheus_client import CollectorRegistry, Gauge, pushadd_to_gateway
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
+# ----------------- CONFIG -----------------
+LOG_DIR = r"C:\path\to\logs"               # <-- update
+PUSHGATEWAY_URL = "http://localhost:9091"  # <-- update if needed
+JOB_NAME = "log_metrics_job"
+DEBUG = False
+MAX_WARN = 3600
+PUSH_INTERVAL = 60.0  # push metrics every 1 min
+
+# ----------------- REGEX -----------------
+pretrade_pattern = re.compile(r"Saved\s+Focus\s+trade\s+(\d+)\s+from\s+pretrade", re.IGNORECASE)
+start_pattern = re.compile(r"Found\s+MQ\s+Message\s+ID\s*\[Hex\]\s*=\s*\[(.*?)\]", re.IGNORECASE)
+end_pattern = re.compile(r"Save trade \[(.*?)\] complete", re.IGNORECASE)
+failed_mq_pattern = re.compile(r"Failed\s+to\s+Find\s+MQ\s+Message\s+ID\s*\[Hex\]\s*=\s*\[.*?\]", re.IGNORECASE)
+qproxy_request_pattern = re.compile(
+    r"Received\s+RequestManagerCall\s+response\s+from\s+QProxy\s+for\s+Requestid\s+(\d+)\s+in\s+([\d.]+)\s*s", re.IGNORECASE)
+pv01_pattern = re.compile(
+    r"Received\s+PV01\s+response\s+from\s+QProxy\s+for\s+(\d+)\s+with\s+Request\s+Id\s+(\d+)\s+in\s+([\d.]+)\s*s", re.IGNORECASE)
+file_regex = re.compile(r"^(AppFIMLImporter\d*)_.*__([\d\-]+)\.log$")
+
+# ----------------- HELPERS -----------------
+def parse_line_ts(parts):
+    if len(parts) >= 2:
+        dt_str = f"{parts[0].strip()} {parts[1].strip()}"
+        try:
+            return datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S.%f")
+        except:
+            pass
+    for p in parts:
+        try:
+            return datetime.strptime(p.strip(), "%Y-%m-%d %H:%M:%S.%f")
+        except:
+            continue
+    return None
+
+def extract_name_from_filename(base):
+    m = file_regex.match(base)
+    if m:
+        return m.group(1), m.group(2)
+    return None, None
+
+# ----------------- PROMETHEUS METRICS -----------------
+registry = CollectorRegistry()
+labels = ["name", "file_name", "file_date"]
+
+g_mq_total = Gauge("log_mq_messages_total", "Total MQ messages", labels, registry=registry)
+g_mq_failed = Gauge("log_failed_mq_messages_total", "Total failed MQ messages", labels, registry=registry)
+g_trades_processed_total = Gauge("log_trades_processed_total", "Total trades processed", labels, registry=registry)
+g_trade_duration = Gauge("log_trade_duration_seconds", "Duration between MQ found and Save trade",
+                         labels + ["trade_id", "message_id"], registry=registry)
+g_qproxy = Gauge("log_qproxy_request_time_seconds", "QProxy RequestManagerCall time",
+                 labels + ["trade_id", "request_id"], registry=registry)
+g_pv01 = Gauge("log_qproxy_pv01_time_seconds", "QProxy PV01 time",
+               labels + ["trade_id", "value", "request_id"], registry=registry)
+
+# ----------------- REAL-TIME STATE -----------------
+realtime_state = {}  # per file
+
+# ----------------- PROCESS ONE LINE -----------------
+def process_realtime_line(filename, line):
+    base = os.path.basename(filename)
+    name_label, file_date = extract_name_from_filename(base)
+    if not name_label:
+        return
+
+    parts = line.split("|")
+    ts = parse_line_ts(parts)
+    if ts is None:
+        return
+
+    msg = parts[6].strip() if len(parts) >= 7 else ""
+
+    global_state = realtime_state.setdefault(base, {
+        "pending_pretrades": deque(),
+        "start_stack": [],
+        "trades": [],
+        "qproxy": [],
+        "pv01": [],
+        "mq_total": 0,
+        "mq_failed": 0
+    })
+
+    pending = global_state["pending_pretrades"]
+    starts = global_state["start_stack"]
+
+    # ---------- PRETRADE ----------
+    m = pretrade_pattern.search(msg)
+    if m:
+        tid = m.group(1)
+        if tid not in pending and not any(f["trade_id"] == tid for f in starts):
+            pending.append(tid)
+        return
+
+    # ---------- START ----------
+    m = start_pattern.search(msg)
+    if m:
+        global_state["mq_total"] += 1
+        msg_id = m.group(1)
+        if pending:
+            assigned_tid = pending.popleft()
+            frame = {"start_ts": ts, "msg_id": msg_id, "trade_id": assigned_tid, "qproxy": [], "pv01": []}
+            starts.append(frame)
+        return
+
+    # ---------- FAILED MQ ----------
+    if failed_mq_pattern.search(msg):
+        global_state["mq_failed"] += 1
+        return
+
+    # ---------- QPROXY ----------
+    m = qproxy_request_pattern.search(msg)
+    if m:
+        req_id, dur = m.group(1), float(m.group(2))
+        if starts:
+            starts[-1]["qproxy"].append({"request_id": req_id, "duration": dur})
+        else:
+            global_state["qproxy"].append({"trade_id": None, "request_id": req_id, "duration": dur})
+        return
+
+    # ---------- PV01 ----------
+    m = pv01_pattern.search(msg)
+    if m:
+        value, req_id, dur = m.group(1), m.group(2), float(m.group(3))
+        if starts:
+            starts[-1]["pv01"].append({"value": value, "request_id": req_id, "duration": dur})
+        else:
+            global_state["pv01"].append({"trade_id": None, "value": value, "request_id": req_id, "duration": dur})
+        return
+
+    # ---------- END ----------
+    m = end_pattern.search(msg)
+    if m:
+        tid = m.group(1)
+        matched_idx = None
+        for i in range(len(starts)-1, -1, -1):
+            if starts[i]["trade_id"] == tid:
+                matched_idx = i
+                break
+        if matched_idx is None:
+            return
+
+        frame = starts.pop(matched_idx)
+        duration = (ts - frame["start_ts"]).total_seconds()
+
+        # record trade
+        t = {"trade_id": tid, "message_id": frame["msg_id"], "start": frame["start_ts"], "end": ts, "duration": duration}
+        global_state["trades"].append(t)
+
+        # update gauges immediately
+        g_trade_duration.labels(name_label, filename, file_date, tid, frame["msg_id"]).set(duration)
+        for q in frame["qproxy"]:
+            g_qproxy.labels(name_label, filename, file_date, tid, q["request_id"]).set(q["duration"])
+        for p in frame["pv01"]:
+            g_pv01.labels(name_label, filename, file_date, tid, p["value"], p["request_id"]).set(p["duration"])
+
+# ----------------- WATCHDOG HANDLER -----------------
+class LogHandler(FileSystemEventHandler):
+    def __init__(self):
+        self.file_positions = {}
+
+    def on_modified(self, event):
+        if event.is_directory:
+            return
+        path = event.src_path
+        if "AppFIMLImporter" not in os.path.basename(path):
+            return
+        pos = self.file_positions.get(path, 0)
+        with open(path, "r", errors="ignore") as f:
+            f.seek(pos)
+            for line in f:
+                process_realtime_line(path, line.rstrip("\n"))
+            self.file_positions[path] = f.tell()
+
+# ----------------- MAIN LOOP -----------------
+if __name__ == "__main__":
+    observer = Observer()
+    observer.schedule(LogHandler(), path=LOG_DIR, recursive=False)
+    observer.start()
+    print(f"[REALTIME] Watching directory: {LOG_DIR}")
+
+    last_push = time.time()
+    try:
+        while True:
+            time.sleep(1)
+            if time.time() - last_push > PUSH_INTERVAL:
+                pushadd_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+                print("[REALTIME] Metrics pushed to PushGateway")
+                last_push = time.time()
+    except KeyboardInterrupt:
+        observer.stop()
+    observer.join()
