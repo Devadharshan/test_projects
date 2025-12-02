@@ -1,0 +1,125 @@
+input {
+  beats {
+    port => 5044
+  }
+}
+
+filter {
+
+  #########################################################
+  # 1) Parse the log line format
+  #########################################################
+  grok {
+    match => {
+      "message" => [
+        '%{DATE:log_date}\|%{TIME:log_time}\|%{INT:thread}\|%{DATA:thd}\|%{DATA:log_level}\|%{DATA:source}\|%{GREEDYDATA:msg}'
+      ]
+    }
+  }
+
+  mutate {
+    add_field => {
+      "log_ts" => "%{log_date} %{log_time}"
+    }
+  }
+
+  date {
+    match => ["log_ts", "yyyy-MM-dd HH:mm:ss.SSS"]
+    timezone => "Asia/Kolkata"
+    target => "@timestamp"
+  }
+
+  #########################################################
+  # 2) CLASSIFY EVENT TYPES
+  #########################################################
+  if "Found MQ Message ID [Hex] =" in [msg] {
+    mutate { add_field => { "event_type" => "start" } }
+    grok { match => { "msg" => "Found MQ Message ID \[Hex\] = \[%{DATA:hex_id}\]" } }
+  }
+  else if "Save trade" in [msg] and "complete" in [msg] {
+    mutate { add_field => { "event_type" => "end" } }
+    grok { match => { "msg" => "Save trade \[%{DATA:trade_id}\] complete" } }
+  }
+  else if "Failed to Find MQ Message ID" in [msg] {
+    mutate { add_field => { "event_type" => "failed" } }
+    grok { match => { "msg" => "Failed to Find MQ Message ID \[Hex\] = \[%{DATA:hex_id}\]" } }
+  }
+  else if "Saved Focus trade" in [msg] {
+    mutate { add_field => { "event_type" => "pretrade" } }
+    grok { match => { "msg" => "Saved Focus trade %{DATA:trade_id} from pretrade %{DATA:pretrade_id}" } }
+  }
+
+  #########################################################
+  # 3) AGGREGATE BLOCK FOR MQ START / FAILED (task_id = hex_id)
+  #########################################################
+  if [event_type] in ["start","failed"] {
+    aggregate {
+      task_id => "%{hex_id}"
+      timeout => 600
+      timeout_code => "
+        # If MQ never completed, still write an event showing timeout
+        event.set('mq_status', 'timeout')
+      "
+      code => "
+        if event.get('event_type') == 'start'
+          map['start_time'] = event.get('@timestamp')
+          map['hex_id'] = event.get('hex_id')
+          map['mq_status'] = 'started'
+        elsif event.get('event_type') == 'failed'
+          map['mq_status'] = 'failed'
+        end
+      "
+      map_action => "create_or_update"
+      end_of_task => "%{[event_type]} == 'failed'"
+    }
+  }
+
+  #########################################################
+  # 4) AGGREGATE BLOCK FOR TRADE (task_id = trade_id)
+  #########################################################
+  if [event_type] in ["pretrade","end"] {
+    aggregate {
+      task_id => "%{trade_id}"
+      timeout => 600
+      timeout_code => "
+        event.set('trade_status', 'timeout')
+      "
+      code => "
+        if event.get('event_type') == 'pretrade'
+          map['trade_id'] = event.get('trade_id')
+          map['pretrade_id'] = event.get('pretrade_id')
+        elsif event.get('event_type') == 'end'
+          start_time = map['start_time']
+          if start_time
+            duration = event.get('@timestamp') - start_time
+            event.set('duration_ms', duration.to_f * 1000)
+          else
+            event.set('duration_ms', -1)
+          end
+
+          event.set('trade_id', map['trade_id'])
+          event.set('pretrade_id', map['pretrade_id'])
+          event.set('hex_id', map['hex_id'])
+          event.set('trade_status', 'completed')
+        end
+      "
+      map_action => "create_or_update"
+      end_of_task => "%{[event_type]} == 'end'"
+    }
+  }
+
+}
+
+#########################################################
+# 5) OUTPUT
+#########################################################
+output {
+  elasticsearch {
+    hosts => ["http://localhost:9200"]
+    index => "fiml-logs-%{+YYYY.MM.dd}"
+    user => "elastic"
+    password => "your_password"
+  }
+
+  stdout { codec => rubydebug }
+}
