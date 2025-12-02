@@ -1,0 +1,123 @@
+input {
+  beats {
+    port => 5044
+  }
+}
+
+filter {
+
+  ##################################################
+  # GROK: parse log lines
+  ##################################################
+  grok {
+    match => {
+      "message" => [
+        # Start Msg
+        '%{DATE:log_date}\|%{TIME:log_time}\|.*Found MQ Message ID \[Hex\] = \[%{DATA:hex_id}\]',
+        # End Msg
+        '%{DATE:log_date}\|%{TIME:log_time}\|.*Save trade %{DATA:trade_id} complete',
+        # Failed Msg
+        '%{DATE:log_date}\|%{TIME:log_time}\|.*Failed to Find MQ Message ID \[Hex\] = \[%{DATA:hex_id}\]',
+        # Pretrade Msg
+        '%{DATE:log_date}\|%{TIME:log_time}\|.*Saved Focus trade %{DATA:trade_id} from pretrade %{DATA:pretrade_id}',
+        # QProxy Msg
+        '%{DATE:log_date}\|%{TIME:log_time}\|.*Received RequestManagerCall response from QProxy for Requestid %{DATA:req_id} in %{NUMBER:duration} s',
+        # PV01 Msg
+        '%{DATE:log_date}\|%{TIME:log_time}\|.*Received PV01 response from QProxy for %{DATA:value} with Request Id %{DATA:req_id} in %{NUMBER:duration} s'
+      ]
+    }
+  }
+
+  ##################################################
+  # MUTATE: construct @timestamp
+  ##################################################
+  mutate {
+    add_field => { "log_ts" => "%{log_date} %{log_time}" }
+  }
+
+  date {
+    match => ["log_ts", "yyyy-MM-dd HH:mm:ss.SSS"]
+    timezone => "Asia/Kolkata"
+  }
+
+  ##################################################
+  # MARK EVENT TYPES
+  ##################################################
+  mutate {
+    add_field => {
+      "is_start" => "false"
+      "is_end" => "false"
+      "is_pretrade" => "false"
+      "is_qproxy" => "false"
+      "is_pv01" => "false"
+    }
+  }
+
+  if "Found MQ Message ID" in [message] {
+    mutate { replace => { "is_start" => "true" } }
+  }
+
+  if "Save trade" in [message] {
+    mutate { replace => { "is_end" => "true" } }
+  }
+
+  if "Saved Focus trade" in [message] {
+    mutate { replace => { "is_pretrade" => "true" } }
+  }
+
+  if "Received RequestManagerCall response from QProxy" in [message] {
+    mutate { replace => { "is_qproxy" => "true" } }
+  }
+
+  if "Received PV01 response from QProxy" in [message] {
+    mutate { replace => { "is_pv01" => "true" } }
+  }
+
+  ##################################################
+  # AGGREGATE: track trades, durations, qproxy, pv01
+  ##################################################
+  aggregate {
+    task_id => "%{trade_id}"          # Must exist for aggregation
+    code => "
+      map['trade_id'] ||= event.get('trade_id')
+      map['start'] ||= event.get('log_ts') if event.get('is_start') == 'true'
+      map['end'] ||= event.get('log_ts') if event.get('is_end') == 'true'
+
+      map['qproxy'] ||= []
+      if event.get('is_qproxy') == 'true'
+        map['qproxy'] << { 'req_id' => event.get('req_id'), 'duration' => event.get('duration') }
+      end
+
+      map['pv01'] ||= []
+      if event.get('is_pv01') == 'true'
+        map['pv01'] << { 'req_id' => event.get('req_id'), 'value' => event.get('value'), 'duration' => event.get('duration') }
+      end
+    "
+    end_of_task => "%{is_end}"        # Correct syntax: string only
+    push_map_as_event_on_timeout => true
+    timeout => 300
+    timeout_tags => ['_aggregatetimeout']
+
+    timeout_code => "
+      if map['start'] && map['end']
+        start_ts = Time.parse(map['start'])
+        end_ts = Time.parse(map['end'])
+        event.set('duration', (end_ts - start_ts).to_f)
+      end
+      event.set('qproxy', map['qproxy'])
+      event.set('pv01', map['pv01'])
+    "
+  }
+
+}
+
+output {
+  elasticsearch {
+    hosts => ["http://localhost:9200"]
+    index => "bp-logs-%{+YYYY.MM.dd}"
+    user => "elastic"
+    password => "your_password"
+  }
+
+  stdout { codec => rubydebug }
+}
