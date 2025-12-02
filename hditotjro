@@ -1,0 +1,187 @@
+input {
+  beats {
+    port => 5044
+  }
+}
+
+filter {
+
+  ###########################################################################
+  # 1. Split log line into fields based on your format:
+  #    Date | Time | Thrd | Thd | L | Source | Message
+  ###########################################################################
+  grok {
+    match => {
+      "message" => "%{DATE:log_date}\|%{TIME:log_time}\|%{DATA:thrd}\|%{DATA:thd}\|%{DATA:l}\|%{DATA:source}\|%{GREEDYDATA:msg}"
+    }
+  }
+
+  mutate {
+    add_field => { "log_ts" => "%{log_date} %{log_time}" }
+  }
+
+  date {
+    match => ["log_ts", "yyyy-MM-dd HH:mm:ss.SSS"]
+    timezone => "Asia/Kolkata"
+  }
+
+  ###########################################################################
+  # 2. CLASSIFY EVENT TYPE (start, end, failed, pretrade)
+  ###########################################################################
+
+  # START
+  if "Found MQ Message ID" in [msg] {
+    mutate {
+      add_field => {
+        "event_type" => "start"
+      }
+    }
+    grok { match => { "msg" => "Found MQ Message ID \[Hex\] = \[%{DATA:hex_id}\]" } }
+  }
+
+  # END
+  else if "Save trade" in [msg] and "complete" in [msg] {
+    mutate {
+      add_field => {
+        "event_type" => "end"
+      }
+    }
+    grok { match => { "msg" => "Save trade \[%{DATA:trade_id}\] complete" } }
+  }
+
+  # FAILED
+  else if "Failed to Find MQ Message ID" in [msg] {
+    mutate {
+      add_field => {
+        "event_type" => "failed"
+      }
+    }
+    grok { match => { "msg" => "Failed to Find MQ Message ID \[Hex\] = \[%{DATA:hex_id}\]" } }
+  }
+
+  # PRETRADE
+  else if "Saved Focus trade" in [msg] {
+    mutate {
+      add_field => {
+        "event_type" => "pretrade"
+      }
+    }
+    grok { match => { "msg" => "Saved Focus trade %{DATA:trade_id} from pretrade %{DATA:pretrade_id}" } }
+  }
+
+  ###########################################################################
+  # 3. PRETRADE HANDLING — store upcoming trade_id
+  ###########################################################################
+  if [event_type] == "pretrade" {
+
+    aggregate {
+      task_id => "pending"
+      map_action => "create_or_update"
+      timeout => 3600
+
+      code => "
+        map['queue'] ||= []
+        map['queue'] << event.get('trade_id')
+      "
+    }
+  }
+
+  ###########################################################################
+  # 4. START HANDLING — assign correct trade_id from queue
+  ###########################################################################
+  if [event_type] == "start" {
+
+    # We treat 'start' as not-end
+    mutate { add_field => { "is_end" => "false" } }
+
+    aggregate {
+      task_id => "%{hex_id}"
+      map_action => "create_or_update"
+      timeout => 3600
+      end_of_task => "%{is_end}"
+
+      code => "
+        # take next trade_id from queue
+        pending = aggregate_maps['pending']
+        if pending and pending['queue'] and pending['queue'].size > 0
+          tid = pending['queue'].shift
+          map['trade_id'] = tid
+        end
+
+        map['start_time'] = event.get('@timestamp')
+        map['hex_id'] = event.get('hex_id')
+      "
+    }
+  }
+
+  ###########################################################################
+  # 5. FAILED HANDLING
+  ###########################################################################
+
+  if [event_type] == "failed" {
+
+    mutate { add_field => { "is_end" => "true" } }
+
+    aggregate {
+      task_id => "%{hex_id}"
+      map_action => "update"
+      timeout => 3600
+      end_of_task => "%{is_end}"
+
+      code => "
+        map['status'] = 'failed'
+      "
+    }
+  }
+
+  ###########################################################################
+  # 6. END HANDLING — compute duration
+  ###########################################################################
+
+  if [event_type] == "end" {
+
+    mutate { add_field => { "is_end" => "true" } }
+
+    aggregate {
+      task_id => "%{trade_id}"
+      map_action => "update"
+      timeout => 3600
+      end_of_task => "%{is_end}"
+
+      code => "
+        if map['start_time']
+          duration = event.get('@timestamp') - map['start_time']
+          map['duration_seconds'] = duration / 1000.0
+        end
+
+        map['status'] = 'success'
+      "
+
+      timeout_code => "
+        map['status'] = 'timeout'
+      "
+    }
+  }
+
+  ###########################################################################
+  # 7. EMIT FINAL EVENT
+  ###########################################################################
+  if [duration_seconds] {
+    mutate {
+      add_field => {
+        "calculated_duration" => "%{duration_seconds}"
+      }
+    }
+  }
+}
+
+output {
+  elasticsearch {
+    hosts => ["http://localhost:9200"]
+    index => "fiml-trades-%{+YYYY.MM.dd}"
+    user => "elastic"
+    password => "your_password"
+  }
+
+  stdout { codec => rubydebug }
+}
