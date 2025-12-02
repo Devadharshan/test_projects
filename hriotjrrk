@@ -1,0 +1,359 @@
+#!/usr/bin/env python3
+"""
+Production-safe real-time log monitoring + PushGateway exporter.
+
+Features:
+- Watches LOG_DIR for files matching AppFIMLImporter*_ProdLon_x64__*.log using watchdog (rotation-aware).
+- Parses lines for: Pretrade, Start (Found MQ Message ID), Failed MQ, QProxy, PV01, End (Save trade).
+- Keeps in-memory state per file (pending_pretrades, start_stack, trades, qproxy, pv01, counts).
+- Updates per-trade gauges immediately in memory and pushes metrics to PushGateway every PUSH_INTERVAL
+  ONLY if there is new data to send (avoids unnecessary pushes).
+- Push behavior: builds a fresh CollectorRegistry on each push and sets only gauges that have values.
+- Safe: read-only on logs, minimal CPU, suitable to run as a background service started by Task Scheduler.
+
+Requirements:
+  pip install prometheus-client watchdog
+
+Update LOG_DIR and PUSHGATEWAY_URL before running.
+"""
+
+import os
+import re
+import time
+import signal
+from glob import glob
+from datetime import datetime
+from collections import deque
+from prometheus_client import CollectorRegistry, Gauge, pushadd_to_gateway
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
+# ----------------- CONFIG -----------------
+LOG_DIR = r"C:\path\to\logs"               # <-- update to your logs dir
+PUSHGATEWAY_URL = "http://localhost:9091"  # <-- update if needed
+JOB_NAME = "log_metrics_job"
+PUSH_INTERVAL = 60.0   # seconds between PushGateway updates (1 minute)
+DEBUG = False
+
+# ----------------- REGEX -----------------
+pretrade_pattern = re.compile(r"Saved\s+Focus\s+trade\s+(\d+)\s+from\s+pretrade", re.IGNORECASE)
+start_pattern = re.compile(r"Found\s+MQ\s+Message\s+ID\s*\[Hex\]\s*=\s*\[(.*?)\]", re.IGNORECASE)
+end_pattern = re.compile(r"Save trade \[(.*?)\] complete", re.IGNORECASE)
+failed_mq_pattern = re.compile(r"Failed\s+to\s+Find\s+MQ\s+Message\s+ID", re.IGNORECASE)
+qproxy_request_pattern = re.compile(
+    r"Received\s+RequestManagerCall\s+response\s+from\s+QProxy\s+for\s+Requestid\s+(\d+)\s+in\s+([\d.]+)\s*s",
+    re.IGNORECASE,
+)
+pv01_pattern = re.compile(
+    r"Received\s+PV01\s+response\s+from\s+QProxy\s+for\s+(\d+)\s+with\s+Request\s+Id\s+(\d+)\s+in\s+([\d.]+)\s*s",
+    re.IGNORECASE,
+)
+file_regex = re.compile(r"^(AppFIMLImporter\d*)_.*__([\d\-]+)\.log$")
+
+# ----------------- HELPERS -----------------
+def parse_line_ts(parts):
+    """Try parse timestamp from first two columns (Date|Time)."""
+    if len(parts) >= 2:
+        try:
+            return datetime.strptime(parts[0].strip() + " " + parts[1].strip(), "%Y-%m-%d %H:%M:%S.%f")
+        except Exception:
+            pass
+    # fallback: scan parts for a timestamp-like value
+    for p in parts:
+        try:
+            return datetime.strptime(p.strip(), "%Y-%m-%d %H:%M:%S.%f")
+        except Exception:
+            continue
+    return None
+
+def extract_name_from_filename(base):
+    """Return (name_label, file_date) or (None, None)"""
+    m = file_regex.match(base)
+    if m:
+        return m.group(1), m.group(2)
+    return None, None
+
+# ----------------- PROMETHEUS METRIC NAMES (no global registry state kept) -----------------
+# We'll create a fresh registry for every push and only set gauges that have values.
+
+# ----------------- REAL-TIME STATE -----------------
+# Keyed by base filename (basename)
+realtime_state = {}  # structure described below
+
+# Each state entry:
+# {
+#   "pending_pretrades": deque([trade_id, ...]),
+#   "start_stack": [ { "start_ts": datetime, "msg_id": str, "trade_id": str, "qproxy": [...], "pv01":[...] }, ... ],
+#   "trades": [ {trade_id, message_id, start, end, duration}, ... ],
+#   "mq_total": int,
+#   "mq_failed": int,
+#   "dirty": bool   # whether this file has new data since last push
+# }
+
+# ----------------- PROCESS A SINGLE LOG LINE -----------------
+def process_realtime_line(filename, line):
+    base = os.path.basename(filename)
+    name_label, file_date = extract_name_from_filename(base)
+    if not name_label:
+        return
+
+    parts = line.split("|")
+    ts = parse_line_ts(parts)
+    if ts is None:
+        return
+
+    msg = parts[6].strip() if len(parts) >= 7 else ""
+
+    state = realtime_state.setdefault(
+        base,
+        {
+            "pending_pretrades": deque(),
+            "start_stack": [],
+            "trades": [],
+            "mq_total": 0,
+            "mq_failed": 0,
+            "dirty": False,
+        },
+    )
+
+    pending = state["pending_pretrades"]
+    starts = state["start_stack"]
+
+    # PRETRADE
+    m = pretrade_pattern.search(msg)
+    if m:
+        tid = m.group(1)
+        if tid not in pending and not any(f["trade_id"] == tid for f in starts):
+            pending.append(tid)
+            state["dirty"] = True
+        return
+
+    # START
+    m = start_pattern.search(msg)
+    if m:
+        state["mq_total"] += 1
+        msg_id = m.group(1)
+        if pending:
+            assigned_tid = pending.popleft()
+            frame = {"start_ts": ts, "msg_id": msg_id, "trade_id": assigned_tid, "qproxy": [], "pv01": []}
+            starts.append(frame)
+            state["dirty"] = True
+        return
+
+    # FAILED MQ
+    if failed_mq_pattern.search(msg):
+        state["mq_failed"] += 1
+        state["dirty"] = True
+        return
+
+    # QPROXY
+    m = qproxy_request_pattern.search(msg)
+    if m:
+        req_id, dur = m.group(1), float(m.group(2))
+        if starts:
+            starts[-1]["qproxy"].append({"request_id": req_id, "duration": dur})
+        else:
+            # orphan qproxy: store as a small trade-like entry (optional)
+            state.setdefault("orphan_qproxy", []).append({"trade_id": None, "request_id": req_id, "duration": dur})
+        state["dirty"] = True
+        return
+
+    # PV01
+    m = pv01_pattern.search(msg)
+    if m:
+        value, req_id, dur = m.group(1), m.group(2), float(m.group(3))
+        if starts:
+            starts[-1]["pv01"].append({"value": value, "request_id": req_id, "duration": dur})
+        else:
+            state.setdefault("orphan_pv01", []).append({"trade_id": None, "value": value, "request_id": req_id, "duration": dur})
+        state["dirty"] = True
+        return
+
+    # END
+    m = end_pattern.search(msg)
+    if m:
+        tid = m.group(1)
+        matched_idx = None
+        for i in range(len(starts) - 1, -1, -1):
+            if starts[i]["trade_id"] == tid:
+                matched_idx = i
+                break
+        if matched_idx is None:
+            # no matching start frame -> skip
+            return
+
+        frame = starts.pop(matched_idx)
+        duration = (ts - frame["start_ts"]).total_seconds()
+
+        t = {"trade_id": tid, "message_id": frame["msg_id"], "start": frame["start_ts"], "end": ts, "duration": duration}
+        state["trades"].append(t)
+        state["dirty"] = True
+        return
+
+# ----------------- WATCHDOG HANDLER -----------------
+class LogHandler(FileSystemEventHandler):
+    def __init__(self):
+        super().__init__()
+        self.file_positions = {}
+
+    def on_modified(self, event):
+        if event.is_directory:
+            return
+        path = event.src_path
+        basename = os.path.basename(path)
+        # only process our target files
+        if "AppFIMLImporter" not in basename:
+            return
+        pos = self.file_positions.get(path, 0)
+        try:
+            with open(path, "r", errors="ignore") as f:
+                f.seek(pos)
+                for line in f:
+                    process_realtime_line(path, line.rstrip("\n"))
+                self.file_positions[path] = f.tell()
+        except FileNotFoundError:
+            # file rotated or removed; reset position
+            if path in self.file_positions:
+                del self.file_positions[path]
+        except Exception as e:
+            if DEBUG:
+                print(f"[ERROR] reading {path}: {e}")
+
+# ----------------- PUSH METRICS (only when data present) -----------------
+def push_metrics_if_needed():
+    """
+    Build a fresh CollectorRegistry, add gauges only for files that have data (or their lists),
+    and push to PushGateway. After successful push, clear the 'dirty' flags (but keep the trades
+    history if you want to preserve counts across pushes).
+    """
+    # Determine if anything to push
+    any_data = False
+    for base, state in realtime_state.items():
+        if state.get("dirty"):
+            any_data = True
+            break
+    if not any_data:
+        if DEBUG:
+            print("[PUSH] No new data to push, skipping")
+        return
+
+    registry = CollectorRegistry()
+    # Define gauges (labels same as earlier)
+    labels = ["name", "file_name", "file_date"]
+
+    g_mq_total = Gauge("log_mq_messages_total", "Total MQ messages", labels, registry=registry)
+    g_mq_failed = Gauge("log_failed_mq_messages_total", "Total failed MQ messages", labels, registry=registry)
+    g_trades_processed_total = Gauge("log_trades_processed_total", "Total trades processed", labels, registry=registry)
+
+    g_trade_duration = Gauge(
+        "log_trade_duration_seconds",
+        "Trade duration between MQ Found and Save Trade",
+        labels + ["trade_id", "message_id"],
+        registry=registry,
+    )
+    g_qproxy = Gauge(
+        "log_qproxy_request_time_seconds",
+        "QProxy RequestManagerCall time",
+        labels + ["trade_id", "request_id"],
+        registry=registry,
+    )
+    g_pv01 = Gauge(
+        "log_qproxy_pv01_time_seconds",
+        "PV01 time",
+        labels + ["trade_id", "value", "request_id"],
+        registry=registry,
+    )
+
+    # Populate gauges only for files that have something
+    for base, state in realtime_state.items():
+        name_label, file_date = extract_name_from_filename(base)
+        if not name_label:
+            continue
+
+        # Totals - only set if non-zero or trades present
+        if state.get("mq_total", 0) or state.get("mq_failed", 0) or state.get("trades"):
+            g_mq_total.labels(name_label, base, file_date).set(state.get("mq_total", 0))
+            g_mq_failed.labels(name_label, base, file_date).set(state.get("mq_failed", 0))
+            g_trades_processed_total.labels(name_label, base, file_date).set(len(state.get("trades", [])))
+
+        # Per-trade durations
+        for t in state.get("trades", []):
+            # set duration only if numeric
+            try:
+                g_trade_duration.labels(name_label, base, file_date, t["trade_id"], t["message_id"]).set(float(t["duration"]))
+            except Exception:
+                continue
+
+        # QProxy / PV01 (include orphan ones too)
+        for q in state.get("orphan_qproxy", []) + sum((f.get("qproxy", []) for f in state.get("start_stack", [])), []):
+            # orphan qproxy have trade_id None; skip unless we want to expose them
+            tid = q.get("trade_id") or ""
+            req = q.get("request_id")
+            dur = q.get("duration")
+            if req and dur is not None:
+                g_qproxy.labels(name_label, base, file_date, tid, req).set(float(dur))
+
+        for p in state.get("orphan_pv01", []) + sum((f.get("pv01", []) for f in state.get("start_stack", [])), []):
+            tid = p.get("trade_id") or ""
+            req = p.get("request_id")
+            value = p.get("value") or ""
+            dur = p.get("duration")
+            if req and dur is not None:
+                g_pv01.labels(name_label, base, file_date, tid, value, req).set(float(dur))
+
+    # Push
+    try:
+        pushadd_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+        if DEBUG:
+            print("[PUSH] Metrics pushed to PushGateway")
+        # Clear dirty flags (do not clear historical lists unless you want to)
+        for state in realtime_state.values():
+            state["dirty"] = False
+    except Exception as e:
+        # On failure, keep dirty=True so we retry next interval
+        print(f"[ERROR] Push to PushGateway failed: {e}")
+
+# ----------------- GRACEFUL SHUTDOWN -----------------
+stop_requested = False
+
+def handle_stop(signum, frame):
+    global stop_requested
+    stop_requested = True
+    print("[INFO] Shutdown requested, exiting...")
+
+signal.signal(signal.SIGINT, handle_stop)
+signal.signal(signal.SIGTERM, handle_stop)
+
+# ----------------- MAIN (watch + periodic push) -----------------
+def main():
+    # ensure log dir exists
+    if not os.path.isdir(LOG_DIR):
+        raise SystemExit(f"LOG_DIR does not exist: {LOG_DIR}")
+
+    # start observer
+    observer = Observer()
+    handler = LogHandler()
+    observer.schedule(handler, path=LOG_DIR, recursive=False)
+    observer.start()
+    print(f"[REALTIME] Watching directory: {LOG_DIR}")
+
+    last_push = time.time()
+    try:
+        while not stop_requested:
+            time.sleep(1)
+            # periodic push
+            if time.time() - last_push >= PUSH_INTERVAL:
+                push_metrics_if_needed()
+                last_push = time.time()
+    finally:
+        observer.stop()
+        observer.join()
+        # final push attempt on shutdown
+        try:
+            push_metrics_if_needed()
+        except Exception:
+            pass
+        print("[INFO] Exited.")
+
+if __name__ == "__main__":
+    main()
