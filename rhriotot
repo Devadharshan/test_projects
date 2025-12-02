@@ -1,0 +1,131 @@
+input {
+  beats {
+    port => 5044
+  }
+}
+
+filter {
+
+  ###########################################################
+  # 1. GROK PARSING OF 4 LOG TYPES
+  ###########################################################
+  grok {
+    match => {
+      "message" => [
+
+        # START message
+        '%{DATE:log_date}\|%{TIME:log_time}\|%{INT:thread_id}\|.*Found MQ Message ID \[Hex\] = \[%{DATA:hex_id}\]',
+        
+        # END (Save Trade)
+        '%{DATE:log_date}\|%{TIME:log_time}\|%{INT:thread_id}\|.*Save trade %{DATA:trade_id} complete',
+
+        # FAILED
+        '%{DATE:log_date}\|%{TIME:log_time}\|%{INT:thread_id}\|.*Failed to Find MQ Message ID \[Hex\] = \[%{DATA:hex_id}\]',
+
+        # PRETRADE
+        '%{DATE:log_date}\|%{TIME:log_time}\|%{INT:thread_id}\|.*Saved Focus trade %{DATA:trade_id} from pretrade %{DATA:pretrade_id}'
+      ]
+    }
+  }
+
+  ###########################################################
+  # 2. BUILD @timestamp FROM DATE+TIME
+  ###########################################################
+  mutate {
+    add_field => {
+      "log_ts" => "%{log_date} %{log_time}"
+    }
+  }
+
+  date {
+    match => ["log_ts", "yyyy-MM-dd HH:mm:ss.SSS"]
+    timezone => "Asia/Kolkata"
+  }
+
+  ###########################################################
+  # 3. TAG EVENT TYPES
+  ###########################################################
+  if "Found MQ Message ID" in [message] {
+    mutate { add_field => { "event_type" => "start" } }
+    mutate { add_field => { "trade_id" => "%{hex_id}" } } # using hex as trade key
+  }
+
+  if "Save trade" in [message] and "complete" in [message] {
+    mutate { add_field => { "event_type" => "end" } }
+    mutate { add_field => { "is_end" => true } }
+  }
+
+  if "Saved Focus trade" in [message] {
+    mutate { add_field => { "event_type" => "pretrade" } }
+  }
+
+  if "Failed to Find MQ Message" in [message] {
+    mutate { add_field => { "event_type" => "failed" } }
+    mutate { add_field => { "is_end" => true } }
+  }
+
+  ###########################################################
+  # 4. AGGREGATE LOGIC FOR DURATION CALCULATION
+  ###########################################################
+  aggregate {
+    task_id => "%{trade_id}"
+
+    code => '
+      # store start time
+      if event.get("event_type") == "start"
+        map["start_ts"] = event.get("@timestamp")
+        map["hex_id"]   = event.get("hex_id")
+      end
+
+      # store end time
+      if event.get("event_type") == "end"
+        map["end_ts"]  = event.get("@timestamp")
+        map["is_end"]  = true
+      end
+
+      # store pretrade info
+      if event.get("event_type") == "pretrade"
+        map["pretrade_id"] = event.get("pretrade_id")
+      end
+
+      # store failed info
+      if event.get("event_type") == "failed"
+        map["failed"] = true
+        map["is_end"] = true
+      end
+    '
+
+    push_previous_map_as_event => true
+
+    timeout_task_id_field => "trade_id"
+    timeout => 300
+
+    timeout_code => '
+      if map["start_ts"] && map["end_ts"]
+        duration = (map["end_ts"].to_f - map["start_ts"].to_f) * 1000
+        event.set("duration_ms", duration)
+      end
+
+      event.set("hex_id", map["hex_id"]) if map["hex_id"]
+      event.set("pretrade_id", map["pretrade_id"]) if map["pretrade_id"]
+      event.set("failed", map["failed"]) if map["failed"]
+    '
+
+    end_of_task => "%{is_end}"
+  }
+
+}
+
+###########################################################
+# 5. OUTPUT TO ELASTICSEARCH
+###########################################################
+output {
+  elasticsearch {
+    hosts => ["http://localhost:9200"]
+    index => "bp-logs-%{+YYYY.MM.dd}"
+    user => "elastic"
+    password => "your_password"
+  }
+
+  stdout { codec => rubydebug }
+}
