@@ -1,0 +1,141 @@
+input {
+  beats {
+    port => 5044
+  }
+}
+
+filter {
+
+  #########################################
+  # 1. GROK pattern for your full log line
+  #########################################
+  grok {
+    match => {
+      "message" => '%{DATE:log_date}\|%{TIME:log_time}\.%{INT:ms}\|\s*%{INT:thread}\|\s*%{DATA:thd}\|\s*%{DATA:level}\|\s*%{WORD:source}\|\s*%{GREEDYDATA:msg}'
+    }
+  }
+
+  mutate {
+    add_field => {
+      "log_ts" => "%{log_date} %{log_time}.%{ms}"
+    }
+  }
+
+  date {
+    match => ["log_ts", "yyyy-MM-dd HH:mm:ss.SSS"]
+    timezone => "Asia/Kolkata"
+  }
+
+  ##########################################################
+  # 2. Identify msg type (start / end / failed / pretrade)
+  ##########################################################
+  if "Found MQ Message ID [Hex] =" in [msg] {
+    grok {
+      match => { "msg" => 'Found MQ Message ID \[Hex\] = \[%{DATA:hex_id}\]' }
+    }
+    mutate { add_field => { "event_type" => "start" } }
+  }
+
+  else if "Save trade" in [msg] and "complete" in [msg] {
+    grok {
+      match => { "msg" => 'Save trade %{DATA:trade_id} complete' }
+    }
+    mutate { add_field => { "event_type" => "end" } }
+  }
+
+  else if "Failed to Find MQ Message ID" in [msg] {
+    grok {
+      match => { "msg" => 'Failed to Find MQ Message ID \[Hex\] = \[%{DATA:hex_id}\]' }
+    }
+    mutate { add_field => { "event_type" => "failed" } }
+  }
+
+  else if "Saved Focus trade" in [msg] {
+    grok {
+      match => { "msg" => 'Saved Focus trade %{DATA:trade_id} from pretrade %{DATA:pretrade_id}' }
+    }
+    mutate { add_field => { "event_type" => "pretrade" } }
+  }
+
+
+  ##########################################################
+  # 3. Maintain state like Python using aggregate filter
+  ##########################################################
+
+  # START event → store timestamp
+  if [event_type] == "start" {
+    aggregate {
+      task_id => "%{hex_id}"
+      code => "
+        map['start_time'] = event.get('@timestamp')
+        map['hex_id'] = event.get('hex_id')
+        map['status'] = 'started'
+      "
+      map_action => "create"
+      timeout => 600
+    }
+  }
+
+  # PRETRADE → attach trade ID for same hex
+  if [event_type] == "pretrade" {
+    aggregate {
+      task_id => "%{trade_id}"
+      code => "
+        map['pretrade_id'] = event.get('pretrade_id')
+        map['trade_id'] = event.get('trade_id')
+      "
+      map_action => "update"
+      timeout => 600
+    }
+  }
+
+  # FAILED → close without duration
+  if [event_type] == "failed" {
+    aggregate {
+      task_id => "%{hex_id}"
+      code => "
+        map['status'] = 'failed'
+      "
+      map_action => "update"
+      end_of_task => true
+      timeout => 600
+    }
+  }
+
+  # END → match by trade_id or hex when available
+  if [event_type] == "end" {
+    aggregate {
+      task_id => "%{trade_id}"
+      code => "
+        if map['start_time']
+          duration = event.get('@timestamp') - map['start_time']
+          event.set('duration_ms', duration.to_f * 1000)
+        else
+          event.set('duration_ms', -1)
+        end
+        event.set('trade_id', map['trade_id'])
+        event.set('pretrade_id', map['pretrade_id'])
+        event.set('hex_id', map['hex_id'])
+        map['status'] = 'completed'
+      "
+      map_action => "update"
+      end_of_task => true
+      timeout => 600
+    }
+  }
+
+}
+
+##########################################################
+# 4. Output to Elasticsearch
+##########################################################
+output {
+  elasticsearch {
+    hosts => ["http://localhost:9200"]
+    index => "bp-log-metrics-%{+YYYY.MM.dd}"
+    user => "elastic"
+    password => "your_password"
+  }
+
+  stdout { codec => rubydebug }
+}
