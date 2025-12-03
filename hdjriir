@@ -1,0 +1,107 @@
+pipeline {
+    agent {
+        label params.REGION == "EMEA" ? "bnpp-deploytools-emea" :
+              params.REGION == "APAC" ? "bnpp-deploytools-apac" :
+                                         "bnpp-deploytools-amer"
+    }
+
+    parameters {
+        choice(name: 'REGION',      choices: ['EMEA', 'AMER', 'APAC'], description: 'Select region')
+        choice(name: 'ENVIRONMENT', choices: ['DEV', 'STG', 'PRD'], description: 'Select environment')
+        text(name: 'samson_version', description: 'Samson version (leave empty to auto-detect)')
+        string(name: 'HOST_VALUES', defaultValue: '', description: 'optional comma separated hostnames to target')
+    }
+
+    stages {
+
+        stage("Select Regional Artifactory Token") {
+            steps {
+                script {
+                    if (params.REGION == 'EMEA') {
+                        withCredentials([string(credentialsId: 'Artifactory_EMEA_Key', variable: 'ART_KEY')]) {
+                            env.ARTIFACTORY_KEY = ART_KEY
+                            env.BASE_ARTIFACTORY_URL = "https://artifactory-emea.company.com/samson/"
+                        }
+                    } else if (params.REGION == 'APAC') {
+                        withCredentials([string(credentialsId: 'Artifactory_APAC_Key', variable: 'ART_KEY')]) {
+                            env.ARTIFACTORY_KEY = ART_KEY
+                            env.BASE_ARTIFACTORY_URL = "https://artifactory-apac.company.com/samson/"
+                        }
+                    } else {
+                        withCredentials([string(credentialsId: 'Artifactory_AMER_Key', variable: 'ART_KEY')]) {
+                            env.ARTIFACTORY_KEY = ART_KEY
+                            env.BASE_ARTIFACTORY_URL = "https://artifactory-amer.company.com/samson/"
+                        }
+                    }
+                }
+            }
+        }
+
+        stage("Determine Samson Version") {
+            steps {
+                script {
+                    if (!params.samson_version?.trim()) {
+                        // auto-detect latest samson-*.zip in Artifactory
+                        env.SAMSON_ARTIFACT = sh (
+                            script: """curl -s -H "X-JFrog-Art-Api:${env.ARTIFACTORY_KEY}" ${env.BASE_ARTIFACTORY_URL} | \
+                                      grep -o 'samson-[0-9.]*.zip' | sort -V | tail -1""",
+                            returnStdout: true
+                        ).trim()
+                        if (!env.SAMSON_ARTIFACT) {
+                            error "No samson artifact found in Artifactory at ${env.BASE_ARTIFACTORY_URL}"
+                        }
+                        env.SAMSON_VERSION = env.SAMSON_ARTIFACT.replace("samson-","").replace(".zip","")
+                    } else {
+                        env.SAMSON_VERSION = params.samson_version.trim()
+                        env.SAMSON_ARTIFACT = "samson-${env.SAMSON_VERSION}.zip"
+                    }
+                    echo "Version chosen: ${env.SAMSON_VERSION}"
+                }
+            }
+        }
+
+        stage("Prepare Inventory") {
+            steps {
+                script {
+                    // If HOST_VALUES passed, build a simple inventory with those hosts
+                    if (params.HOST_VALUES?.trim()) {
+                        def hosts = params.HOST_VALUES.split(',').collect{ it.trim() }.findAll{ it }
+                        def inv = "[staging]\\n"
+                        hosts.each{ inv += "${it} ansible_connection=winrm ansible_user=Administrator ansible_password=REDACTED\\n" }
+                        writeFile file: 'ansible/inventories/staging', text: inv
+                        echo "Generated inventory based on HOST_VALUES"
+                    } else {
+                        // you can provide a default static file or let it be pre-committed
+                        echo "Using existing ansible/inventories/staging inventory"
+                    }
+                }
+            }
+        }
+
+        stage("Download Samsons from Artifactory") {
+            steps {
+                sh '''
+                curl -H "X-JFrog-Art-Api:${ARTIFACTORY_KEY}" \
+                  -o samson-${SAMSON_VERSION}.zip \
+                  ${BASE_ARTIFACTORY_URL}${SAMSON_ARTIFACT}
+                '''
+            }
+        }
+
+        stage("Run Ansible Playbook") {
+            steps {
+                sh """
+                ansible-playbook ansible/playbooks/deploy_samson.yml \
+                  -i ansible/inventories/staging \
+                  -e version=${SAMSON_VERSION} \
+                  -e artifactory_url=${BASE_ARTIFACTORY_URL}${SAMSON_ARTIFACT}
+                """
+            }
+        }
+    }
+
+    post {
+        success { echo "Samson deployment finished" }
+        failure { echo "Samson deployment failed" }
+    }
+}
