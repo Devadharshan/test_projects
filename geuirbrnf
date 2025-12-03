@@ -1,0 +1,332 @@
+import os
+import re
+from glob import glob
+from datetime import datetime
+from collections import deque
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway, pushadd_to_gateway
+import logging
+import sys
+import time
+
+# ----------------- CONFIG -----------------
+LOG_DIR = r"C:\path\to\logs"
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "log_metrics_job"
+
+# Set DEBUG True for very verbose logs (per-line/per-match)
+DEBUG = False
+MAX_WARN = 3600
+
+# ----------------- LOGGING SETUP -----------------
+logger = logging.getLogger("log_parser")
+handler = logging.StreamHandler(sys.stdout)
+formatter = logging.Formatter("%(asctime)s %(levelname)s: %(message)s")
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+logger.propagate = False
+logger.setLevel(logging.DEBUG if DEBUG else logging.INFO)
+
+# ----------------- REGEX -----------------
+start_pattern = re.compile(
+    r"Found\s+MQ\s+M(?:esaage|essage)\s+ID\s*\[Hex\]\s*=\s*\[(.*?)\]",
+    re.IGNORECASE
+)
+
+end_pattern = re.compile(
+    r"Save trade \[(.*?)\] complete",
+    re.IGNORECASE
+)
+
+failed_mq_pattern = re.compile(
+    r"Failed\s+MQ(?:\s+M(?:esaage|essage)\s+ID\s*\[.*?\])?",
+    re.IGNORECASE
+)
+
+qproxy_request_pattern = re.compile(
+    r"Received RequestManagerCall response from QProxy for Requestid\s+(\d+)\s+in\s+([\d.]+)\s*s",
+    re.IGNORECASE
+)
+
+pv01_pattern = re.compile(
+    r"Received PV01 response from QProxy for\s+(\d+)\s+with Request Id\s+(\d+)\s+in\s+([\d\.]+)\s*s(?:\s*\[\*\*SLOW\*\*\])?",
+    re.IGNORECASE
+)
+
+file_regex = re.compile(r"^(AppFIMLImporter\d*)_.*__([\d\-]+)\.log$")
+
+# ----------------- HELPERS -----------------
+def parse_line_ts(parts):
+    # Try primary format (parts[0] + parts[1])
+    if len(parts) >= 2:
+        dt_str = f"{parts[0].strip()} {parts[1].strip()}"
+        try:
+            return datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S.%f")
+        except:
+            pass
+
+    # Fallback: search any part for a full datetime string
+    for p in parts:
+        p = p.strip()
+        try:
+            return datetime.strptime(p, "%Y-%m-%d %H:%M:%S.%f")
+        except:
+            continue
+    return None
+
+def extract_name_from_filename(base):
+    m = file_regex.match(base)
+    if m:
+        return m.group(1), m.group(2)
+    return None, None
+
+# ----------------- COLLECT -----------------
+start_time_run = time.time()
+file_results = {}
+log_files = glob(os.path.join(LOG_DIR, "AppFIMLImporter*_ProdLon_x64__*.log"))
+
+logger.info(f"Found {len(log_files)} files matching glob in {LOG_DIR}")
+
+if DEBUG and log_files:
+    logger.debug("Files:")
+    for f in log_files:
+        logger.debug("  " + f)
+
+for log_idx, log_file in enumerate(log_files, start=1):
+    base = os.path.basename(log_file)
+    name_label, file_date = extract_name_from_filename(base)
+    if not name_label:
+        logger.info(f"Skipping file (name/date not matched): {base}")
+        continue
+
+    logger.info(f"[{log_idx}/{len(log_files)}] Processing file: {base} (name={name_label}, date={file_date})")
+
+    # Per-file counters
+    lines_read = 0
+    start_hits = 0
+    end_hits = 0
+    qproxy_hits = 0
+    pv01_hits = 0
+    failed_hits = 0
+
+    # Start frames (each start_frame holds its own qproxy/pv01 events)
+    start_stack = deque()
+    trades = []
+    qproxy_calls = []
+    pv01_calls = []
+    mq_total = 0
+    mq_failed = 0
+
+    with open(log_file, "r", errors="ignore") as fh:
+        for raw in fh:
+            lines_read += 1
+            parts = raw.rstrip("\n").split("|")
+            ts = parse_line_ts(parts)
+            if ts is None:
+                if DEBUG:
+                    logger.debug(f"{base} line {lines_read}: no valid timestamp - skipping")
+                continue
+
+            msg = parts[6].strip() if len(parts) >= 7 else ""
+            # START
+            m = start_pattern.search(msg)
+            if m:
+                mq_total += 1
+                start_hits += 1
+                start_frame = {
+                    "start_ts": ts,
+                    "msg_id": m.group(1),
+                    "qproxy": [],
+                    "pv01": []
+                }
+                start_stack.append(start_frame)
+                if DEBUG:
+                    logger.debug(f"{base} L{lines_read}: START msg_id={m.group(1)} ts={ts} (stack_size={len(start_stack)})")
+                continue
+
+            # FAILED MQ
+            if failed_mq_pattern.search(msg):
+                mq_failed += 1
+                failed_hits += 1
+                if DEBUG:
+                    logger.debug(f"{base} L{lines_read}: FAILED MQ detected")
+
+            # QProxy RequestManagerCall
+            m = qproxy_request_pattern.search(msg)
+            if m:
+                qproxy_hits += 1
+                req_id = m.group(1)
+                dur = float(m.group(2))
+                if start_stack:
+                    start_stack[-1]["qproxy"].append({"request_id": req_id, "duration": dur})
+                    if DEBUG:
+                        logger.debug(f"{base} L{lines_read}: QPROXY attached to start (req={req_id}, dur={dur})")
+                else:
+                    qproxy_calls.append({"request_id": req_id, "duration": dur, "trade_id": None})
+                    if DEBUG:
+                        logger.debug(f"{base} L{lines_read}: QPROXY orphan (req={req_id}, dur={dur})")
+                continue
+
+            # PV01
+            m = pv01_pattern.search(msg)
+            if m:
+                pv01_hits += 1
+                value = m.group(1)
+                req_id = m.group(2)
+                dur = float(m.group(3))
+                if start_stack:
+                    start_stack[-1]["pv01"].append({"value": value, "request_id": req_id, "duration": dur})
+                    if DEBUG:
+                        logger.debug(f"{base} L{lines_read}: PV01 attached to start (value={value}, req={req_id}, dur={dur})")
+                else:
+                    pv01_calls.append({"value": value, "request_id": req_id, "duration": dur, "trade_id": None})
+                    if DEBUG:
+                        logger.debug(f"{base} L{lines_read}: PV01 orphan (value={value}, req={req_id}, dur={dur})")
+                continue
+
+            # END (Save trade)
+            m = end_pattern.search(msg)
+            if m:
+                end_hits += 1
+                trade_id = m.group(1)
+
+                # Find most recent start with start_ts <= end_ts
+                matched_idx = None
+                for i in range(len(start_stack) - 1, -1, -1):
+                    if start_stack[i]["start_ts"] <= ts:
+                        matched_idx = i
+                        break
+
+                if matched_idx is None:
+                    if DEBUG:
+                        logger.debug(f"{base} L{lines_read}: END for trade {trade_id} but no matching start (orphan end).")
+                    # we don't create a trade record, but continue
+                    continue
+
+                # Pop the matched frame
+                start_frame = start_stack.pop(matched_idx)
+                start_ts = start_frame["start_ts"]
+                msg_id = start_frame["msg_id"]
+                duration = (ts - start_ts).total_seconds()
+
+                if duration < 0:
+                    if DEBUG:
+                        logger.debug(f"{base} L{lines_read}: Negative duration for trade {trade_id} (start {start_ts} end {ts}) - skipping")
+                    continue
+                if duration > MAX_WARN:
+                    logger.warning(f"{base}: Large trade time {duration:.3f}s for trade {trade_id} (start {start_ts} end {ts})")
+
+                trades.append({
+                    "message_id": msg_id,
+                    "trade_id": trade_id,
+                    "start": start_ts,
+                    "end": ts,
+                    "duration": duration
+                })
+
+                # flush attached qproxy/pv01 into file-level lists with trade_id assigned
+                for q in start_frame["qproxy"]:
+                    qproxy_calls.append({"request_id": q["request_id"], "duration": q["duration"], "trade_id": trade_id})
+                for p in start_frame["pv01"]:
+                    pv01_calls.append({"value": p["value"], "request_id": p["request_id"], "duration": p["duration"], "trade_id": trade_id})
+
+                if DEBUG:
+                    logger.debug(f"{base} L{lines_read}: END matched trade_id={trade_id} msg_id={msg_id} dur={duration:.3f}s (stack_size now {len(start_stack)})")
+                continue
+
+    # After file processed, log per-file summary
+    logger.info(f"Finished file: {base} — lines={lines_read}, starts={start_hits}, ends={end_hits}, qproxy={qproxy_hits}, pv01={pv01_hits}, failed={failed_hits}, trades={len(trades)}")
+    if DEBUG:
+        logger.debug(f"  Remaining unmatched starts in stack: {len(start_stack)}")
+        if start_stack:
+            for i, s in enumerate(start_stack, 1):
+                logger.debug(f"    Unmatched {i}: start_ts={s['start_ts']} msg_id={s['msg_id']} qproxy_count={len(s['qproxy'])} pv01_count={len(s['pv01'])}")
+
+    file_results[base] = {
+        "name": name_label,
+        "file_date": file_date,
+        "mq_total": mq_total,
+        "mq_failed": mq_failed,
+        "trades": trades,
+        "qproxy": qproxy_calls,
+        "pv01": pv01_calls
+    }
+
+# ----------------- METRICS -----------------
+registry = CollectorRegistry()
+
+labels = ["name", "file_name", "file_date"]
+
+g_mq_total = Gauge("log_mq_messages_total", "Total MQ messages", labels, registry=registry)
+g_mq_failed = Gauge("log_failed_mq_messages_total", "Total failed MQ messages", labels, registry=registry)
+
+g_trades_processed_total = Gauge(
+    "log_trades_processed_total",
+    "Total trades processed",
+    ["name", "file_name", "file_date"],
+    registry=registry
+)
+
+g_trade_duration = Gauge(
+    "log_trade_duration_seconds",
+    "Duration between MQ found and Save trade",
+    ["name", "file_name", "file_date", "trade_id", "message_id"],
+    registry=registry
+)
+
+g_qproxy = Gauge(
+    "log_qproxy_request_time_seconds",
+    "QProxy RequestManagerCall time",
+    ["name", "file_name", "file_date", "request_id", "trade_id"],
+    registry=registry
+)
+
+g_pv01 = Gauge(
+    "log_qproxy_pv01_time_seconds",
+    "QProxy PV01 time",
+    ["name", "file_name", "file_date", "value", "request_id", "trade_id"],
+    registry=registry
+)
+
+# ----------------- FILL METRICS -----------------
+total_files = len(file_results)
+logger.info(f"Pushing metrics for {total_files} files to Pushgateway ({PUSHGATEWAY_URL})")
+
+for fname, data in file_results.items():
+
+    name_label = data["name"]
+    file_date = data["file_date"]
+
+    g_mq_total.labels(name_label, fname, file_date).set(data["mq_total"])
+    g_mq_failed.labels(name_label, fname, file_date).set(data["mq_failed"])
+    g_trades_processed_total.labels(name_label, fname, file_date).set(len(data["trades"]))
+
+    for t in data["trades"]:
+        g_trade_duration.labels(
+            name_label, fname, file_date, t["trade_id"], t["message_id"]
+        ).set(t["duration"])
+
+    for q in data["qproxy"]:
+        g_qproxy.labels(
+            name_label, fname, file_date, q["request_id"], q["trade_id"]
+        ).set(q["duration"])
+
+    for p in data["pv01"]:
+        g_pv01.labels(
+            name_label, fname, file_date,
+            p["value"], p["request_id"], p["trade_id"]
+        ).set(p["duration"])
+
+# ----------------- PUSH -----------------
+try:
+    pushadd_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+    logger.info("Metrics pushed successfully (pushadd)")
+except Exception as e:
+    logger.warning("pushadd_to_gateway failed, falling back to push_to_gateway: %s", e)
+    try:
+        push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+        logger.info("Metrics pushed successfully (push_to_gateway)")
+    except Exception as e2:
+        logger.error("Failed to push metrics: %s", e2)
+
+end_time_run = time.time()
+logger.info("Script completed in %.2f seconds", end_time_run - start_time_run)
