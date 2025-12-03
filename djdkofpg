@@ -1,0 +1,15 @@
+---
+- name: Deploy Samson to selected environment
+  hosts: all
+  gather_facts: true
+  become: yes
+
+  vars:
+    # These will be overridden by -e from Jenkins
+    samson_version: "{{ version | default('latest') }}"
+    artifactory_url: "{{ artifactory_url | default('') }}"
+    host_location: "{{ host_location | default('C:\\Samson') }}"
+    samson_sublocation: "{{ samson_sublocation | default('current') }}"
+
+  roles:
+    - ansible-role-samson
