@@ -1,0 +1,251 @@
+import os
+import re
+from glob import glob
+from datetime import datetime
+from collections import deque
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway, pushadd_to_gateway
+
+# ----------------- CONFIG -----------------
+LOG_DIR = r"C:\path\to\logs"
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "log_metrics_job"
+
+DEBUG = True               # <---- TURN ON LOGGING
+MAX_WARN = 3600
+
+# Compute today's date for filtering
+TODAY = datetime.now().strftime("%Y-%m-%d")
+if DEBUG:
+    print(f"[INFO] Today’s Date Filter: {TODAY}")
+
+
+# ----------------- REGEX -----------------
+start_pattern = re.compile(
+    r"Found\s+MQ\s+M(?:esaage|essage)\s+ID\s*\[Hex\]\s*=\s*\[(.*?)\]",
+    re.IGNORECASE
+)
+
+end_pattern = re.compile(
+    r"Save trade \[(.*?)\] complete",
+    re.IGNORECASE
+)
+
+failed_mq_pattern = re.compile(
+    r"Failed\s+MQ(?:\s+M(?:esaage|essage)\s+ID\s*\[.*?\])?",
+    re.IGNORECASE
+)
+
+qproxy_request_pattern = re.compile(
+    r"Received RequestManagerCall response from QProxy for Requestid\s+(\d+)\s+in\s+([\d.]+)\s*s",
+    re.IGNORECASE
+)
+
+pv01_pattern = re.compile(
+    r"Received PV01 response from QProxy for\s+(\d+)\s+with Request Id\s+(\d+)\s+in\s+([\d\.]+)\s*s(?:\s*\[\*\*SLOW\*\*\])?",
+    re.IGNORECASE
+)
+
+file_regex = re.compile(r"^(AppFIMLImporter\d*)_.*__([\d\-]+)\.log$")
+
+
+# ----------------- HELPERS -----------------
+def parse_line_ts(parts):
+    if len(parts) < 2:
+        return None
+    dt_str = f"{parts[0].strip()} {parts[1].strip()}"
+    try:
+        return datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S.%f")
+    except:
+        return None
+
+def extract_name_from_filename(base):
+    m = file_regex.match(base)
+    if m:
+        return m.group(1), m.group(2)
+    return None, None
+
+
+# ----------------- COLLECT -----------------
+file_results = {}
+
+# Pick files for today ONLY
+all_files = glob(os.path.join(LOG_DIR, "AppFIMLImporter*_ProdLon_x64__*.log"))
+
+log_files = [f for f in all_files if TODAY in f]
+
+if DEBUG:
+    print("\n[INFO] All files found:")
+    for f in all_files:
+        print("   ", f)
+
+    print("\n[INFO] Files selected for TODAY only:")
+    for f in log_files:
+        print("   ", f)
+
+if not log_files:
+    print("[WARN] No log files for today. Exiting.")
+    
+
+for log_file in log_files:
+
+    base = os.path.basename(log_file)
+    name_label, file_date = extract_name_from_filename(base)
+
+    if DEBUG:
+        print(f"\n\n[PROCESS FILE] {base}")
+        print(f"[FILE INFO] Extracted name={name_label} date={file_date}")
+
+    if not name_label:
+        if DEBUG:
+            print("[SKIP] Filename regex did not match. Skipping.")
+        continue
+
+    start_stack = deque()
+    active_trade_id = None
+
+    trades = []
+    qproxy_calls = []
+    pv01_calls = []
+
+    mq_total = 0
+    mq_failed = 0
+
+    with open(log_file, "r", errors="ignore") as fh:
+        for line_no, raw in enumerate(fh, start=1):
+            parts = raw.rstrip("\n").split("|")
+            ts = parse_line_ts(parts)
+            msg = parts[6].strip() if len(parts) >= 7 else ""
+
+            if DEBUG:
+                print(f"[LINE {line_no}] TS={ts} MSG={msg}")
+
+            if ts is None:
+                continue
+
+            # START MQ
+            m = start_pattern.search(msg)
+            if m:
+                mq_total += 1
+                msg_id = m.group(1)
+                start_stack.append((ts, msg_id, None))
+                if DEBUG:
+                    print(f"   > START FOUND msg_id={msg_id} time={ts}")
+                continue
+
+            # FAILED MQ
+            if failed_mq_pattern.search(msg):
+                mq_failed += 1
+                if DEBUG:
+                    print(f"   > FAILED MQ FOUND")
+                continue
+
+            # QPROXY REQUEST
+            m = qproxy_request_pattern.search(msg)
+            if m:
+                req_id = m.group(1)
+                dur = float(m.group(2))
+                qproxy_calls.append({
+                    "request_id": req_id,
+                    "duration": dur,
+                    "trade_id": active_trade_id
+                })
+                if DEBUG:
+                    print(f"   > QPROXY REQUEST req_id={req_id} dur={dur}s trade={active_trade_id}")
+                continue
+
+            # PV01 REQUEST
+            m = pv01_pattern.search(msg)
+            if m:
+                value = m.group(1)
+                req_id = m.group(2)
+                dur = float(m.group(3))
+                pv01_calls.append({
+                    "value": value,
+                    "request_id": req_id,
+                    "duration": dur,
+                    "trade_id": active_trade_id
+                })
+                if DEBUG:
+                    print(f"   > PV01 req_id={req_id} dur={dur}s trade={active_trade_id}")
+                continue
+
+            # END (Save trade)
+            m = end_pattern.search(msg)
+            if m:
+                trade_id = m.group(1)
+                active_trade_id = trade_id
+
+                if DEBUG:
+                    print(f"   > END FOUND trade_id={trade_id} at {ts}")
+
+                if start_stack:
+                    start_ts, msg_id, _ = start_stack.pop()
+                    duration = (ts - start_ts).total_seconds()
+
+                    if DEBUG:
+                        print(f"      MATCHED START {start_ts} WITH END {ts}  --> duration={duration}s")
+
+                    if duration >= 0:
+                        trades.append({
+                            "message_id": msg_id,
+                            "trade_id": trade_id,
+                            "start": start_ts,
+                            "end": ts,
+                            "duration": duration
+                        })
+                continue
+
+    file_results[base] = {
+        "name": name_label,
+        "file_date": file_date,
+        "mq_total": mq_total,
+        "mq_failed": mq_failed,
+        "trades": trades,
+        "qproxy": qproxy_calls,
+        "pv01": pv01_calls
+    }
+
+
+# ----------------- METRICS -----------------
+registry = CollectorRegistry()
+
+labels = ["name", "file_name", "file_date"]
+
+g_mq_total = Gauge("log_mq_messages_total", "MQ messages", labels, registry=registry)
+g_mq_failed = Gauge("log_failed_mq_messages_total", "Failed MQ messages", labels, registry=registry)
+
+g_trades_processed_total = Gauge(
+    "log_trades_processed_total",
+    "Total trades processed",
+    ["name", "file_name", "file_date"],
+    registry=registry
+)
+
+g_trade_duration = Gauge(
+    "log_trade_duration_seconds",
+    "Time from MQ->Save trade",
+    ["name", "file_name", "file_date", "trade_id", "message_id"],
+    registry=registry
+)
+
+g_qproxy = Gauge(
+    "log_qproxy_request_time_seconds",
+    "QProxy request time",
+    ["name", "file_name", "file_date", "request_id", "trade_id"],
+    registry=registry
+)
+
+g_pv01 = Gauge(
+    "log_qproxy_pv01_time_seconds",
+    "PV01 time",
+    ["name", "file_name", "file_date", "value", "request_id", "trade_id"],
+    registry=registry
+)
+
+# ----------------- PUSH -----------------
+try:
+    pushadd_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+    print("\nMetrics pushed successfully")
+except:
+    push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+    print("\nMetrics pushed (fallback)")
