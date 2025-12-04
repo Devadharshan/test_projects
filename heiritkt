@@ -1,0 +1,134 @@
+// File: Focus-Ansible/Jenkinsfile
+
+def cyberCertFile = 'CA_Bundle.pem' // Jenkins credentials store ID with CyberArk CA Bundle file
+
+// Map certificateMap... (Assuming your existing region-specific maps are here, lines 1-34)
+def certificateMap = [
+    // ... your EMEA, AMER, APAC mappings
+]
+
+pipeline {
+    agent { label "${params.REGION}-deploytools-${params.INFRA_TYPE == 'core-focus' ? 'amer' : params.REGION}" } 
+
+    parameters {
+        choice(name: 'REGION', choices: ['EMEA', 'AMER', 'APAC'], description: 'Select Region to deploy to')
+        choice(name: 'ENVIRONMENT_TYPE', choices: ['PRD', 'STG', 'DEV', 'IV1', 'IV2'], description: 'Select ENVIRONMENT to deploy to')
+        choice(name: 'INFRA_TYPE', choices: ['TSS', 'PVS', 'PMD', 'PMS', 'TNS'], description: 'Select Environment to deploy to')
+        
+        // Assuming you have this parameter for generic host filtering
+        text(name: 'HOST_VALUES', defaultValue: 'all', description: 'Enter specific host names to deploy to. Use "all" to deploy to entire inventory.')
+
+        choice(name: 'PLAYBOOK', choices: ['ping', 'core-focus', 'core-rebase', 'core-app', 'core-focus-reboot', 'core-focus-app'], description: 'Select Playbook to run')
+        choice(name: 'CHOICE_INFRA', choices: ['prod-core-focus', 'staging-core-focus', 'dev-core-focus'], description: 'Select Infra to deploy to')
+        
+        // --- ADDED PARAMETERS FOR SAMSON ROLE ---
+        string(name: 'SAMSON_VERSION', defaultValue: 'latest', description: 'Version of Samson Agent to deploy (Overrides defaults/main.yml)')
+        string(name: 'SAMSON_BASE_URL', defaultValue: 'https://artifactory.com/', description: 'Base URL for Samson artifact download')
+        // --- END ADDED PARAMETERS ---
+        
+        string(name: 'clip_version', description: 'Provide clip version')
+        text(name: 'patch_version', description: 'Only provide, if its a patch release')
+    }
+
+    environment {
+        // Original environment variables
+        BITBUCKET_SSH_KEY = credentials('BITBUCKET_public_access_with_usr') 
+    }
+
+    stages {
+        // ... (Stage: Select Correct Certificates for Region and Environment) ...
+        stage('Select Correct Certificates for Region and Environment') {
+            steps {
+                script {
+                    // ... Your existing logic to set env.cyberCertFile and env.cyberKeyFile ...
+                    env.cyberCertFile = "${certificateMap.REGION [params.ENVIRONMENT_TYPE] [params.INFRA_TYPE] }.crt"
+                    env.cyberKeyFile = "${certificateMap.REGION [params.ENVIRONMENT_TYPE] [params.INFRA_TYPE] }.key"
+                }
+            }
+        }
+
+        // ... (Stage: Select Correct Regional Artifactory Token) ...
+        stage('Select Correct Regional Artifactory Token') {
+            steps {
+                script {
+                    // ... Your existing logic to set Env.Base_Artifactory_URL ...
+                    if (params.REGION == 'AMER') {
+                        // ... set Env.Base_Artifactory_URL ...
+                    } else if (params.REGION == 'APAC') {
+                        // ... set Env.Base_Artifactory_URL ...
+                    } else { // EMEA or default
+                        env.Base_Artifactory_URL = "https://artifactory.cib.echonet"
+                    }
+                }
+            }
+        }
+        
+        // --- MODIFIED STAGE: declare Hosts ---
+        stage('declare Hosts') {
+            steps {
+                script {
+                    if (params.HOST_VALUES != 'all' && params.HOST_VALUES != '') {
+                        // User specified a list of hosts manually
+                        env.HOST_VALUES = params.HOST_VALUES 
+                        env.INVENTORY_FILE = 'none' 
+                    } else {
+                        // Use environment inventory file: e.g., ansible/inventories/STG
+                        env.INVENTORY_FILE = "ansible/inventories/${params.ENVIRONMENT_TYPE}"
+                        env.HOST_VALUES = 'all' 
+                    }
+                    
+                    // Rest of your environment variable setting logic:
+                    env.ENVIRONMENT_TYPE = params.ENVIRONMENT_TYPE
+                    env.PLAYBOOK = params.PLAYBOOK
+                    // ... (rest of your original ENV declarations) ...
+
+                    echo "INVENTORY_FILE -> ${env.INVENTORY_FILE}" 
+                }
+            }
+        }
+        
+        stage('Install Base Build Role Using Ansible Galaxy') {
+            steps {
+                script {
+                    // Your existing logic for SSH setup and ansible-galaxy install
+                    sh 'mkdir -p $HOME/.ssh/'
+                    sh 'chmod 700 $HOME/.ssh'
+                    sh 'ssh-keygen -t rsa -b 4096 -f $HOME/.ssh/id_rsa -N ""'
+                    
+                    // Add the line to install the required Java role dependency
+                    sh 'ansible-galaxy install ansible-role-java' 
+                    
+                    // If you use requirements.yml for other dependencies, include your original command:
+                    // sh 'ansible-galaxy install -r ./playbooks/requirements.yml -p roles' 
+                }
+            }
+        }
+        
+        // --- MODIFIED STAGE: Run Ansible ---
+        stage('Run Ansible') {
+            steps {
+                withCredentials([
+                    // Your CyberArk credentials (passed from previous stages)
+                    string(credentialsId: "${cyberCertFile}", variable: 'CyberCert'),
+                    string(credentialsId: "${cyberKeyFile}", variable: 'CyberKey')
+                ]) {
+                    sh '''
+                    # Execute the deployment playbook, passing Jenkins parameters as extra variables (-e)
+                    ansible-playbook \
+                    -i ${ENV.INVENTORY_FILE} \
+                    -e samson_version=${params.SAMSON_VERSION} \
+                    -e samson_artifact_baseurl=${params.SAMSON_BASE_URL} \
+                    -e arti_url=${Env.Base_Artifactory_URL} \
+                    -e clip_version=${params.clip_version} \
+                    -e patch_version=${params.patch_version} \
+                    -e cyberCertFile=${CyberCert} \
+                    -e cyberKeyFile=${CyberKey} \
+                    ansible/playbooks/deploy-samson.yml
+                    '''
+                }
+            }
+        }
+        
+        // ... (post section if applicable) ...
+    }
+}
