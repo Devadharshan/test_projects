@@ -1,0 +1,188 @@
+import os
+import re
+import time
+import logging
+import datetime
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# -------------------------
+# CONFIG
+# -------------------------
+LOG_DIR = r"C:\logs"
+PUSHGATEWAY = "http://localhost:9091"
+JOB_NAME = "fiml_importer_metrics"
+
+POLL_INTERVAL = 2 * 60   # 2 minutes
+
+
+# -------------------------
+# LOGGING
+# -------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler()]
+)
+
+# -------------------------
+# REGEX PATTERNS
+# -------------------------
+FOUND_PATTERN = r"FOUND\s+Trade\s+(\d+)"
+SAVED_PATTERN = r"SAVED\s+Trade\s+(\d+).*Duration\s+(\d+)"
+
+
+# -------------------------
+# METRICS STORAGE
+# -------------------------
+metrics = {
+    "total_trades": 0,
+    "total_duration": 0,
+    "last_trade_id": None,
+    "new_values": False
+}
+
+# Track timestamps for FOUND → SAVED duration
+found_timestamps = {}  # trade_id → datetime
+
+
+# -------------------------
+# HELPER: GET TODAY'S FILE
+# -------------------------
+def get_today_file():
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    for f in os.listdir(LOG_DIR):
+        if today in f and f.endswith(".log"):
+            return os.path.join(LOG_DIR, f)
+    return None
+
+
+# -------------------------
+# HELPER: SEND METRICS
+# -------------------------
+def push_metrics(date_str):
+    if not metrics["new_values"]:
+        logging.info("No new metrics to send. Skipping push.")
+        return
+
+    registry = CollectorRegistry()
+
+    g_total = Gauge("fiml_total_trades", "Total trades processed today",
+                    ["date"], registry=registry)
+    g_duration = Gauge("fiml_total_duration_seconds", "Total duration",
+                       ["date"], registry=registry)
+    g_avg = Gauge("fiml_avg_duration", "Average duration",
+                  ["date"], registry=registry)
+
+    g_total.labels(date_str).set(metrics["total_trades"])
+    g_duration.labels(date_str).set(metrics["total_duration"])
+
+    avg = (metrics["total_duration"] / metrics["total_trades"]) if metrics["total_trades"] else 0
+    g_avg.labels(date_str).set(avg)
+
+    push_to_gateway(PUSHGATEWAY, job=JOB_NAME, registry=registry)
+
+    logging.info("📡 Metrics pushed successfully")
+    metrics["new_values"] = False
+
+
+# -------------------------
+# PROCESS A SINGLE LINE
+# -------------------------
+def process_line(line):
+    global metrics
+
+    # FOUND TRADE
+    f = re.search(FOUND_PATTERN, line)
+    if f:
+        trade_id = f.group(1)
+        found_timestamps[trade_id] = datetime.datetime.now()
+        logging.info(f"FOUND trade {trade_id}")
+        return
+
+    # SAVED TRADE
+    s = re.search(SAVED_PATTERN, line)
+    if s:
+        trade_id = s.group(1)
+        duration = int(s.group(2))
+
+        start_ts = found_timestamps.get(trade_id)
+        if start_ts:
+            # Optional real-time delta
+            real_delta = (datetime.datetime.now() - start_ts).total_seconds()
+            logging.info(f"SAVED trade {trade_id} | Duration logged={duration}s | Real delta={real_delta}s")
+        else:
+            logging.info(f"SAVED trade {trade_id} found but no FOUND timestamp recorded!")
+
+        metrics["total_trades"] += 1
+        metrics["total_duration"] += duration
+        metrics["last_trade_id"] = trade_id
+        metrics["new_values"] = True
+
+
+# -------------------------
+# PROCESS EXISTING CONTENT
+# -------------------------
+def process_existing(file_path):
+    logging.info("Processing existing lines in today's log file...")
+    with open(file_path, "r", errors="ignore") as f:
+        for line in f:
+            process_line(line)
+    logging.info("Initial processing complete.")
+
+
+# -------------------------
+# TAIL THE FILE LIVE
+# -------------------------
+def tail_file(file_path):
+    logging.info("Starting live tail for new lines...")
+    with open(file_path, "r", errors="ignore") as f:
+        f.seek(0, os.SEEK_END)  # go to end
+
+        while True:
+            line = f.readline()
+            if not line:
+                time.sleep(1)
+                continue
+
+            process_line(line)
+
+
+# -------------------------
+# MAIN LOOP
+# -------------------------
+def main():
+    today_file = get_today_file()
+    if not today_file:
+        logging.error("❌ No log file found for today!")
+        return
+
+    logging.info(f"Today's log file: {today_file}")
+
+    # Process existing log contents
+    process_existing(today_file)
+
+    last_push = time.time()
+
+    # Live tail loop with metric push check
+    with open(today_file, "r", errors="ignore") as f:
+        f.seek(0, os.SEEK_END)
+
+        while True:
+            line = f.readline()
+            if line:
+                process_line(line)
+
+            now = time.time()
+            if now - last_push >= POLL_INTERVAL:
+                date_str = datetime.datetime.now().strftime("%Y-%m-%d")
+                push_metrics(date_str)
+                last_push = now
+
+            time.sleep(1)
+
+
+# -------------------------
+# RUN
+# -------------------------
+if __name__ == "__main__":
+    main()
