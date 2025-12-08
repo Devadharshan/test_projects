@@ -1,0 +1,112 @@
+import os
+import pandas as pd
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+from datetime import datetime, timedelta, timezone
+
+CSV_DIR = r"C:\path\to\csvs"
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "bp_trade_rows"
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+# Normalize label names
+def normalize_label(s):
+    return (
+        str(s)
+        .strip()
+        .lower()
+        .replace(" ", "_")
+        .replace("-", "_")
+        .replace("(", "")
+        .replace(")", "")
+    )
+
+
+def parse_date_from_filename(filename):
+    try:
+        date_part = filename.split("__")[-1].replace(".csv", "")
+        return datetime.strptime(date_part, "%Y-%m-%d").date()
+    except:
+        return None
+
+
+def push_metrics():
+
+    registry = CollectorRegistry()
+    gauge = None
+    expected_labels = None
+
+    for f in os.listdir(CSV_DIR):
+
+        if not f.endswith(".csv"):
+            continue
+        if "_summary" in f:
+            continue
+
+        file_path = os.path.join(CSV_DIR, f)
+        file_date = parse_date_from_filename(f)
+
+        if not file_date:
+            print("❌ Invalid filename date:", f)
+            continue
+
+        try:
+            df = pd.read_csv(file_path)
+            df_orig_columns = df.columns.tolist()
+
+            # Normalize column names
+            df.columns = [normalize_label(c) for c in df.columns]
+
+            # Force DurationPerTrade column
+            if "durationpertrade" not in df.columns:
+                print("❌ Missing DurationPerTrade in:", f)
+                continue
+
+            df["durationpertrade"] = pd.to_numeric(df["durationpertrade"], errors="coerce").fillna(0)
+
+            # -----------------------------------------------------
+            # Create GAUGE only on first file
+            # -----------------------------------------------------
+            if gauge is None:
+                label_names = list(df.columns)
+                label_names.append("file_date")
+
+                expected_labels = set(label_names)
+
+                print("📌 Using these labels:", expected_labels)
+
+                gauge = Gauge(
+                    "bp_durationpertrade_raw",
+                    "Raw DurationPerTrade (one row = one timeseries)",
+                    label_names,
+                    registry=registry
+                )
+            else:
+                # Validate labels for next files
+                current_labels = set(list(df.columns) + ["file_date"])
+                if current_labels != expected_labels:
+                    print("❌ LABEL MISMATCH in file:", f)
+                    print("Expected:", expected_labels)
+                    print("Got:", current_labels)
+                    continue
+
+            # -----------------------------------------------------
+            # Push every row
+            # -----------------------------------------------------
+            for _, row in df.iterrows():
+
+                label_values = {col: str(row[col]) for col in df.columns}
+                label_values["file_date"] = str(file_date)
+
+                gauge.labels(**label_values).set(row["durationpertrade"])
+
+        except Exception as e:
+            print("❌ Error processing", f, ":", e)
+
+    push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+    print("✅ Successfully pushed raw DurationPerTrade metrics!")
+
+
+if __name__ == "__main__":
+    push_metrics()
