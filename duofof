@@ -1,0 +1,358 @@
+#!/usr/bin/env python3
+import os
+import re
+import time
+import logging
+from glob import glob
+from datetime import datetime, date, timedelta
+from collections import deque
+from prometheus_client import CollectorRegistry, Gauge, pushadd_to_gateway, push_to_gateway
+
+# ---------------- CONFIG ----------------
+LOG_DIR = r"C:\path\to\logs"                # <- update
+PUSHGATEWAY_URL = "http://localhost:9091"   # <- update
+JOB_NAME = "log_metrics_job"
+PUSH_INTERVAL = 120     # seconds (2 minutes)
+POLL_INTERVAL = 1       # file polling loop interval (seconds)
+DEBUG = True
+MAX_WARN = 24 * 3600    # sanity check (24 hours)
+
+# ---------------- LOGGING ----------------
+logging.basicConfig(level=logging.DEBUG if DEBUG else logging.INFO,
+                    format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("realtime-logparser")
+
+# ---------------- REGEX ----------------
+FILE_REGEX = re.compile(r"^(AppFIMLImporter\d*)_.*__([\d\-]+)\.log$", re.IGNORECASE)
+
+START_RE = re.compile(r"Found\s+MQ\s+M(?:esaage|essage)\s+ID\s*\[Hex\]\s*=\s*\[(.*?)\]", re.IGNORECASE)
+END_RE = re.compile(r"Save trade \[(.*?)\] complete", re.IGNORECASE)
+FAILED_MQ_RE = re.compile(r"Failed\s+MQ(?:\s+M(?:esaage|essage)\s+ID\s*\[.*?\])?", re.IGNORECASE)
+QPROXY_RE = re.compile(r"Received RequestManagerCall response from QProxy for Requestid\s+(\d+)\s+in\s+([\d.]+)\s*s", re.IGNORECASE)
+PV01_RE = re.compile(r"Received PV01 response from QProxy for\s+(\d+)\s+with Request Id\s+(\d+)\s+in\s+([\d\.]+)\s*s(?:\s*\[\*\*SLOW\*\*\])?", re.IGNORECASE)
+
+# ---------------- HELPERS ----------------
+def extract_name_and_date(filename):
+    base = os.path.basename(filename)
+    m = FILE_REGEX.match(base)
+    if m:
+        return m.group(1), m.group(2)
+    return None, None
+
+def parse_line_ts(parts):
+    """Robust timestamp extraction from line parts (split by '|')."""
+    # try combined first two fields
+    if len(parts) >= 2:
+        s = f"{parts[0].strip()} {parts[1].strip()}"
+        try:
+            return datetime.strptime(s, "%Y-%m-%d %H:%M:%S.%f")
+        except Exception:
+            pass
+    # scan every field for a full timestamp
+    for p in parts:
+        p = p.strip()
+        try:
+            return datetime.strptime(p, "%Y-%m-%d %H:%M:%S.%f")
+        except Exception:
+            continue
+    return None
+
+def today_glob_pattern():
+    """Return glob pattern for today's logs"""
+    today = date.today().strftime("%Y-%m-%d")
+    return os.path.join(LOG_DIR, f"AppFIMLImporter*_ProdLon_x64__{today}.log")
+
+# ---------------- PER-FILE STATE ----------------
+# We'll track an entry for each file we process:
+# file_state[file_basename] = {
+#   "path": path,
+#   "offset": int,
+#   "start_frames": [ {start_ts, msg_id, qproxy:[], pv01:[], lineno} ... ],
+#   "trades": [ ... finalized ],
+#   "qproxy": [ ... flushed ],
+#   "pv01": [ ... flushed ],
+#   "mq_total": int,
+#   "mq_failed": int,
+#   "last_observed": datetime
+# }
+file_state = {}
+
+# ---------------- METRIC NAMES (kept same) ----------------
+def build_registry_and_gauges():
+    registry = CollectorRegistry()
+    labels = ["name", "file_name", "file_date"]
+    g_mq_total = Gauge("log_mq_messages_total", "Total MQ messages", labels, registry=registry)
+    g_mq_failed = Gauge("log_failed_mq_messages_total", "Total failed MQ messages", labels, registry=registry)
+    g_trades_processed_total = Gauge("log_trades_processed_total", "Total trades processed", labels, registry=registry)
+
+    g_trade_duration = Gauge("log_trade_duration_seconds", "Duration between MQ found and Save trade",
+                             ["name", "file_name", "file_date", "trade_id", "message_id"], registry=registry)
+
+    g_qproxy = Gauge("log_qproxy_request_time_seconds", "QProxy RequestManagerCall time",
+                     ["name", "file_name", "file_date", "request_id", "trade_id"], registry=registry)
+
+    g_pv01 = Gauge("log_qproxy_pv01_time_seconds", "QProxy PV01 time",
+                   ["name", "file_name", "file_date", "value", "request_id", "trade_id"], registry=registry)
+
+    return registry, {
+        "g_mq_total": g_mq_total,
+        "g_mq_failed": g_mq_failed,
+        "g_trades_processed_total": g_trades_processed_total,
+        "g_trade_duration": g_trade_duration,
+        "g_qproxy": g_qproxy,
+        "g_pv01": g_pv01
+    }
+
+# ---------------- READ NEW FILES / LINES ----------------
+def discover_today_files():
+    pattern = today_glob_pattern()
+    return sorted(glob(pattern))
+
+def ensure_file_state(path):
+    base = os.path.basename(path)
+    if base in file_state:
+        # update path in case of move
+        file_state[base]["path"] = path
+        return file_state[base]
+    # new file
+    logger.info("Adding file to watch: %s", base)
+    state = {
+        "path": path,
+        "offset": 0,
+        "start_frames": [],   # stack-like list of frames
+        "trades": [],
+        "qproxy": [],
+        "pv01": [],
+        "mq_total": 0,
+        "mq_failed": 0,
+        "last_observed": datetime.utcnow(),
+        "lines_processed": 0
+    }
+    # if file already exists and has content, we start reading from beginning to process historical content
+    try:
+        state["offset"] = 0
+    except Exception:
+        state["offset"] = 0
+    file_state[base] = state
+    return state
+
+def process_line_for_state(state, line, lineno=None):
+    parts = line.split("|")
+    ts = parse_line_ts(parts)
+    if ts is None:
+        return False
+    msg = parts[6].strip() if len(parts) >= 7 else ""
+
+    # START
+    m = START_RE.search(msg)
+    if m:
+        state["mq_total"] += 1
+        state["start_frames"].append({
+            "start_ts": ts,
+            "msg_id": m.group(1),
+            "qproxy": [],
+            "pv01": [],
+            "lineno": lineno
+        })
+        return True
+
+    # FAILED MQ
+    if FAILED_MQ_RE.search(msg):
+        state["mq_failed"] += 1
+        # do not return; allow other matches on same line
+
+    # QPROXY
+    m = QPROXY_RE.search(msg)
+    if m:
+        req = m.group(1)
+        dur = float(m.group(2))
+        if state["start_frames"]:
+            state["start_frames"][-1]["qproxy"].append({"request_id": req, "duration": dur, "lineno": lineno})
+        else:
+            state["qproxy"].append({"request_id": req, "duration": dur, "trade_id": None, "lineno": lineno})
+        return True
+
+    # PV01
+    m = PV01_RE.search(msg)
+    if m:
+        value = m.group(1)
+        req = m.group(2)
+        dur = float(m.group(3))
+        if state["start_frames"]:
+            state["start_frames"][-1]["pv01"].append({"value": value, "request_id": req, "duration": dur, "lineno": lineno})
+        else:
+            state["pv01"].append({"value": value, "request_id": req, "duration": dur, "trade_id": None, "lineno": lineno})
+        return True
+
+    # END
+    m = END_RE.search(msg)
+    if m:
+        trade_id = m.group(1)
+        # find nearest start_frame with start_ts <= ts
+        matched_idx = None
+        for i in range(len(state["start_frames"]) - 1, -1, -1):
+            if state["start_frames"][i]["start_ts"] <= ts:
+                matched_idx = i
+                break
+        if matched_idx is None:
+            logger.warning("Save trade without matching start: trade_id=%s (line ts=%s)", trade_id, ts)
+            return True
+        frame = state["start_frames"].pop(matched_idx)
+        start_ts = frame["start_ts"]
+        msg_id = frame["msg_id"]
+        duration = (ts - start_ts).total_seconds()
+        if duration < 0:
+            logger.warning("Negative duration for trade %s in file %s (start=%s end=%s)", trade_id, state["path"], start_ts, ts)
+            return True
+        if duration > MAX_WARN:
+            logger.warning("Large duration %fs for trade %s in file %s", duration, trade_id, state["path"])
+        # finalize trade
+        state["trades"].append({
+            "message_id": msg_id,
+            "trade_id": trade_id,
+            "start": start_ts,
+            "end": ts,
+            "duration": duration
+        })
+        # flush qproxy/pv01 attached to frame and assign trade_id
+        for q in frame["qproxy"]:
+            state["qproxy"].append({"request_id": q["request_id"], "duration": q["duration"], "trade_id": trade_id, "lineno": q.get("lineno")})
+        for p in frame["pv01"]:
+            state["pv01"].append({"value": p["value"], "request_id": p["request_id"], "duration": p["duration"], "trade_id": trade_id, "lineno": p.get("lineno")})
+        return True
+
+    return False
+
+# ---------------- PUSH / METRICS ----------------
+def collect_and_push_metrics():
+    # build registry and gauges
+    registry = CollectorRegistry()
+    labels = ["name", "file_name", "file_date"]
+    g_mq_total = Gauge("log_mq_messages_total", "Total MQ messages", labels, registry=registry)
+    g_mq_failed = Gauge("log_failed_mq_messages_total", "Total failed MQ messages", labels, registry=registry)
+    g_trades_processed_total = Gauge("log_trades_processed_total", "Total trades processed", labels, registry=registry)
+    g_trade_duration = Gauge("log_trade_duration_seconds", "Duration between MQ found and Save trade",
+                             ["name", "file_name", "file_date", "trade_id", "message_id"], registry=registry)
+    g_qproxy = Gauge("log_qproxy_request_time_seconds", "QProxy RequestManagerCall time",
+                     ["name", "file_name", "file_date", "request_id", "trade_id"], registry=registry)
+    g_pv01 = Gauge("log_qproxy_pv01_time_seconds", "QProxy PV01 time",
+                   ["name", "file_name", "file_date", "value", "request_id", "trade_id"], registry=registry)
+
+    # prepare file_results to decide if we should push
+    file_results = {}
+    should_push = False
+
+    for base, state in file_state.items():
+        name_label, file_date = extract_name_and_date(state["path"])
+        if not name_label:
+            continue
+        file_results[base] = {
+            "name": name_label,
+            "file_date": file_date,
+            "mq_total": state["mq_total"],
+            "mq_failed": state["mq_failed"],
+            "trades": state["trades"],
+            "qproxy": state["qproxy"],
+            "pv01": state["pv01"]
+        }
+        if state["mq_total"] > 0 or state["mq_failed"] > 0 or state["trades"] or state["qproxy"] or state["pv01"]:
+            should_push = True
+
+    if not should_push:
+        logger.debug("No metric data to push at this interval")
+        return
+
+    # fill gauges
+    for fname, data in file_results.items():
+        name_label = data["name"]
+        file_date = data["file_date"]
+
+        g_mq_total.labels(name_label, fname, file_date).set(data["mq_total"])
+        g_mq_failed.labels(name_label, fname, file_date).set(data["mq_failed"])
+        g_trades_processed_total.labels(name_label, fname, file_date).set(len(data["trades"]))
+
+        for t in data["trades"]:
+            g_trade_duration.labels(name_label, fname, file_date, t["trade_id"], t["message_id"]).set(t["duration"])
+
+        for q in data["qproxy"]:
+            g_qproxy.labels(name_label, fname, file_date, q["request_id"], q.get("trade_id")).set(q["duration"])
+
+        for p in data["pv01"]:
+            g_pv01.labels(name_label, fname, file_date, p["value"], p["request_id"], p.get("trade_id")).set(p["duration"])
+
+    # push
+    try:
+        pushadd_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+        logger.info("Metrics pushed (pushadd)")
+    except Exception as e:
+        logger.warning("pushadd failed: %s; falling back", e)
+        try:
+            push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+            logger.info("Metrics pushed (fallback push_to_gateway)")
+        except Exception as e2:
+            logger.exception("Failed to push metrics: %s", e2)
+
+# ---------------- MAIN REALTIME LOOP ----------------
+def main_loop():
+    last_push = datetime.utcnow() - timedelta(seconds=PUSH_INTERVAL)
+    logger.info("Starting real-time processor (today only). Push interval=%ds", PUSH_INTERVAL)
+
+    while True:
+        try:
+            # discover today's files and ensure states
+            files = discover_today_files()
+            for path in files:
+                ensure_file_state(path)
+
+            # remove states for files that are no longer today's files
+            known = set(file_state.keys())
+            today_basenames = set(os.path.basename(p) for p in files)
+            removed = known - today_basenames
+            for base in removed:
+                logger.info("Dropping watch for file (no longer today): %s", base)
+                # we keep historical metrics already collected; just stop watching
+                file_state.pop(base, None)
+
+            # read new data from each file
+            for base, state in list(file_state.items()):
+                path = state["path"]
+                try:
+                    with open(path, "r", errors="ignore") as fh:
+                        fh.seek(state["offset"])
+                        lineno = state.get("lines_processed", 0)
+                        new_lines = 0
+                        for raw in fh:
+                            lineno += 1
+                            line = raw.rstrip("\n")
+                            if not line:
+                                continue
+                            processed = process_line_for_state(state, line, lineno=lineno)
+                            if processed:
+                                new_lines += 1
+                        state["lines_processed"] = lineno
+                        state["offset"] = fh.tell()
+                        if new_lines > 0:
+                            state["last_observed"] = datetime.utcnow()
+                            logger.debug("File %s: processed %d new event lines", base, new_lines)
+                except FileNotFoundError:
+                    logger.warning("File disappeared during processing: %s", path)
+                except Exception:
+                    logger.exception("Error while reading file %s", path)
+
+            # decide whether to push: only if PUSH_INTERVAL elapsed and there is data
+            now = datetime.utcnow()
+            if (now - last_push).total_seconds() >= PUSH_INTERVAL:
+                collect_and_push_metrics()
+                last_push = now
+
+            time.sleep(POLL_INTERVAL)
+        except KeyboardInterrupt:
+            logger.info("Interrupted by user, pushing remaining metrics and exiting...")
+            collect_and_push_metrics()
+            break
+        except Exception:
+            logger.exception("Unhandled error in main loop; sleeping briefly")
+            time.sleep(5)
+
+if __name__ == "__main__":
+    main_loop()
