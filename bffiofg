@@ -1,0 +1,18 @@
+stage('Run Samson Deploy') {
+    steps {
+        dir('ansible') {
+            sh """
+                ansible-playbook \
+                    -i inventories/${params.ENVIRONMENT_TYPE}/hosts \
+                    playbooks/deply_samson.yml \
+                    -e REGION=${params.REGION} \
+                    -e ENVIRONMENT_TYPE=${params.ENVIRONMENT_TYPE} \
+                    -e SAMSON_VERSION=${params.SAMSON_VERSION} \
+                    -e ARTIFACTORY_TOKEN=${env.Artifactory_Key} \
+                    -e ARTIFACTORY_URL=${env.Base_Artifactory_URL} \
+                    -e CERT_FILE=${env.cyberarkCertFile} \
+                    -e KEY_FILE=${env.cyberarkKeyFile}
+            """
+        }
+    }
+}
