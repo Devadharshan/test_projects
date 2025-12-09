@@ -1,0 +1,175 @@
+pipeline {
+
+  agent any
+
+  parameters {
+    choice(name: 'REGION', choices: ['EMEA','AMER','APAC'], description: 'Region')
+    choice(name: 'ENVIRONMENT_TYPE', choices: ['STG','PRD','DEV'], description: 'Environment')
+    string(name: 'SAMSON_VERSION', defaultValue: 'latest', description: 'Samson Version')
+  }
+
+  environment {
+    CA_CREDENTIAL_ID = 'CA_Bundle.pem'      // must exist in Jenkins credentials
+  }
+
+  stages {
+
+    stage('Select Certificates + Artifactory Token') {
+      steps {
+        script {
+
+          /* ----------------------------------------------
+               Certificate mapping (CyberArk cert/key)
+             ---------------------------------------------- */
+          def certificateMap = [
+            EMEA: [
+              STG: [ cert: 'IV2AFOCUS-OPSP', key: 'IV2AFOCUS-OPSP' ],
+              PRD: [ cert: 'IV2AFOCUS-OPSP', key: 'IV2AFOCUS-OPSP' ],
+              DEV: [ cert: 'IV2AFOCUS-OPSD', key: 'IV2AFOCUS-OPSD' ]
+            ],
+            AMER: [
+              STG: [ cert: 'IV2RFOCUS-OPSP', key: 'IV2RFOCUS-OPSP' ],
+              PRD: [ cert: 'IV2RFOCUS-OPSP', key: 'IV2RFOCUS-OPSP' ],
+              DEV: [ cert: 'IV2RFOCUS-OPSD', key: 'IV2RFOCUS-OPSD' ]
+            ],
+            APAC: [
+              STG: [ cert: 'IV2CFOCUS-OPSP', key: 'IV2CFOCUS-OPSP' ],
+              PRD: [ cert: 'IV2CFOCUS-OPSP', key: 'IV2CFOCUS-OPSP' ],
+              DEV: [ cert: 'IV2CFOCUS-OPSD', key: 'IV2CFOCUS-OPSD' ]
+            ]
+          ]
+
+          /* ----------------------------------------------
+               Artifactory URL based on region
+             ---------------------------------------------- */
+          def artUrlMap = [
+            EMEA: "https://artifactory-emea.cib.echonet",
+            AMER: "https://artifactory-amer.cib.echonet",
+            APAC: "https://artifactory-apac.cib.echonet"
+          ]
+
+          // Assign cert ID, key ID, CA ID
+          def certId = certificateMap[params.REGION][params.ENVIRONMENT_TYPE].cert
+          def keyId  = certificateMap[params.REGION][params.ENVIRONMENT_TYPE].key
+          def caId   = env.CA_CREDENTIAL_ID
+
+          env.CERT_ID = certId
+          env.KEY_ID  = keyId
+          env.CA_ID   = caId
+          env.ARTIFACTORY_URL = artUrlMap[params.REGION]
+
+          echo "Using CyberArk certificate: ${certId}"
+          echo "Using Artifactory URL: ${env.ARTIFACTORY_URL}"
+
+          /* ----------------------------------------------
+               Load Artifactory API Token
+             ---------------------------------------------- */
+          withCredentials([
+            string(credentialsId: "Artifactory_${params.REGION}_Key", variable: 'ART_KEY')
+          ]) {
+            env.ARTIFACTORY_KEY = ART_KEY
+          }
+        }
+      }
+    }
+
+    /* ----------------------------------------------
+         Run Ansible Deployment
+       ---------------------------------------------- */
+    stage('Deploy Samson') {
+      steps {
+        script {
+          withCredentials([
+            file(credentialsId: env.CERT_ID, variable: 'CERT_FILE'),
+            file(credentialsId: env.KEY_ID,  variable: 'KEY_FILE'),
+            file(credentialsId: env.CA_ID,   variable: 'CA_FILE')
+          ]) {
+
+            sh """
+              cd ansible
+
+              ansible-playbook \
+                -i invetories/${params.ENVIRONMENT_TYPE}/hosts \
+                playbooks/deply_samson.yml \
+                -e REGION=${params.REGION} \
+                -e ENVIRONMENT_TYPE=${params.ENVIRONMENT_TYPE} \
+                -e SAMSON_VERSION=${params.SAMSON_VERSION} \
+                -e CERT_FILE=${CERT_FILE} \
+                -e KEY_FILE=${KEY_FILE} \
+                -e CA_FILE=${CA_FILE} \
+                -e ARTIFACTORY_URL=${ARTIFACTORY_URL} \
+                -e ARTIFACTORY_KEY=${ARTIFACTORY_KEY}
+            """
+          }
+        }
+      }
+    }
+  }
+}
+
+
+
+
+
+[samson]
+eurvoii48792.xmp.net.intra
+
+[samson:vars]
+ansible_connection=winrm
+ansible_port=5986
+ansible_winrm_transport=certificate
+ansible_winrm_server_cert_validation=ignore
+
+# Certificate paths passed from Jenkins → ansible-playbook
+ansible_winrm_cert_pem="{{ CERT_FILE }}"
+ansible_winrm_cert_key_pem="{{ KEY_FILE }}"
+ansible_winrm_ca_trust_path="{{ CA_FILE }}"
+
+
+
+
+
+
+---
+- name: Deploy Samson to Windows servers
+  hosts: samson
+  gather_facts: true
+  become: false
+
+  vars:
+    # Artifactory configuration
+    samson_artifactory_baseurl: "{{ ARTIFACTORY_URL }}"
+    arti_api_token: "{{ ARTIFACTORY_KEY }}"
+
+    # Deployment parameters
+    samson_version: "{{ SAMSON_VERSION | default('latest') }}"
+    host_location: "{{ HOST_LOCATION | default('C:\\Samson') }}"
+    samson_sublocation: "{{ SAMSON_SUBLOCATION | default('current') }}"
+
+    # CyberArk certificate files passed from Jenkins
+    cert_file: "{{ CERT_FILE }}"
+    key_file: "{{ KEY_FILE }}"
+    ca_file: "{{ CA_FILE }}"
+
+  roles:
+    - ansible-role-samson
+
+
+
+
+[defaults]
+inventory = invetories
+roles_path = roles
+timeout = 60
+host_key_checking = False
+retry_files_enabled = False
+
+[privilege_escalation]
+become = False
+
+[winrm]
+transport = certificate
+server_cert_validation = ignore
+
+
+
