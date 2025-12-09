@@ -1,0 +1,83 @@
+[samson]
+eurvoii48792.xmp.net.intra
+
+[samson:vars]
+ansible_connection=winrm
+ansible_port=5986
+ansible_winrm_transport=certificate
+ansible_winrm_server_cert_validation=ignore
+
+# Passed from Jenkins
+ansible_winrm_cert_pem="{{ CERT_FILE }}"
+ansible_winrm_cert_key_pem="{{ KEY_FILE }}"
+ansible_winrm_ca_trust_path="{{ CA_FILE }}"
+
+
+
+
+
+---
+- name: Deploy Samson to Windows servers
+  hosts: samson
+  gather_facts: true
+  become: false
+
+  vars:
+    samson_version: "{{ SAMSON_VERSION | default('latest') }}"
+    artifactory_url: "{{ ARTIFACTORY_URL | default('') }}"
+    host_location: "{{ HOST_LOCATION | default('C:\\Samson') }}"
+    samson_sublocation: "{{ SAMSON_SUBLOCATION | default('current') }}"
+
+    # Certificate files passed from Jenkins
+    cert_file: "{{ CERT_FILE }}"
+    key_file: "{{ KEY_FILE }}"
+    ca_file: "{{ CA_FILE }}"
+
+  roles:
+    - ansible-role-samson
+
+
+
+
+
+[defaults]
+inventory = inventories
+roles_path = roles
+timeout = 60
+host_key_checking = False
+interpreter_python = auto
+
+[privilege_escalation]
+become = False
+
+[winrm]
+transport = certificate
+server_cert_validation = ignore
+
+
+
+
+
+
+withCredentials([
+    file(credentialsId: certId, variable: 'CERT_FILE'),
+    file(credentialsId: keyId,  variable: 'KEY_FILE'),
+    file(credentialsId: caId,   variable: 'CA_FILE')
+]) {
+    sh """
+    cd ansible
+    ansible-playbook \
+      -i invetories/STG/hosts \
+      playbooks/deply_samson.yml \
+      -e REGION=${REGION} \
+      -e ENVIRONMENT_TYPE=${ENVIRONMENT_TYPE} \
+      -e SAMSON_VERSION=${SAMSON_VERSION} \
+      -e CERT_FILE=${CERT_FILE} \
+      -e KEY_FILE=${KEY_FILE} \
+      -e CA_FILE=${CA_FILE}
+    """
+}
+
+
+
+
