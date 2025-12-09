@@ -1,0 +1,23 @@
+---
+- name: Deploy Samson to Windows servers
+  hosts: samson
+  gather_facts: true
+  become: no
+
+  vars:
+    # Force Windows connection
+    ansible_connection: winrm
+    ansible_port: 5985
+    ansible_winrm_transport: ntlm
+    ansible_winrm_server_cert_validation: ignore
+
+    # Variables from Jenkins
+    samson_version: "{{ SAMSON_VERSION | default('latest') }}"
+    artifactory_url: "{{ ARTIFACTORY_URL | default('') }}"
+    host_location: "{{ HOST_LOCATION | default('C:\\Samson') }}"
+    samson_sublocation: "{{ SAMSON_SUBLOCATION | default('current') }}"
+    cert_file: "{{ CERT_FILE }}"
+    key_file: "{{ KEY_FILE }}"
+
+  roles:
+    - ansible-role-samson
