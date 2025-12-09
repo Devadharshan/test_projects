@@ -1,0 +1,109 @@
+pipeline {
+
+    agent any
+
+    parameters {
+        choice(name: 'REGION', choices: ['EMEA', 'AMER', 'APAC'], description: 'Deployment Region')
+        choice(name: 'ENVIRONMENT_TYPE', choices: ['PRD', 'STG', 'DEV'], description: 'Environment Type')
+        choice(name: 'INFRA_TYPE', choices: ['IV1', 'IV2'], description: 'Infrastructure Layer')
+        string(name: 'SAMSON_VERSION', defaultValue: 'latest', description: 'Samson Version to deploy')
+    }
+
+    environment {
+        cyberarkCAFile = 'CA_Bundle.pem'
+    }
+
+    stages {
+
+        stage('Select Certificates Based on Region / Environment / Infra') {
+            steps {
+                script {
+
+                    // Certificate mapping
+                    def certificateMap = [
+                        EMEA: [
+                            PRD: [ IV2: 'IV2AFOCUS-OPSP', IV1: 'AIM-IV1FOCUS-OPSP-EMEA-Cyberark' ],
+                            STG: [ IV2: 'IV2AFOCUS-OPSP', IV1: 'AIM-IV1FOCUS-OPSP-EMEA-Cyberark' ],
+                            DEV: [ IV2: 'IV2AFOCUS-OPSP', IV1: 'AIM-FOCUS-OPSD-Cyberark' ]
+                        ],
+
+                        AMER: [
+                            PRD: [ IV2: 'IV2RFOCUS-OPSP', IV1: 'AIM-FOCUS-NAR-OPSP-Cyberark' ],
+                            STG: [ IV2: 'IV2RFOCUS-OPSP', IV1: 'AIM-FOCUS-NAR-OPSP-Cyberark' ],
+                            DEV: [ IV2: 'IV2RFOCUS-OPSD', IV1: 'AIM-FOCUS-NAR-OPSD' ]
+                        ],
+
+                        APAC: [
+                            PRD: [ IV2: 'IV2CFOCUS-OPSP', IV1: 'AIM-FOCUS-APAC-OPSP-Cyberark' ],
+                            STG: [ IV2: 'IV2CFOCUS-OPSP', IV1: 'AIM-FOCUS-APAC-OPSP-Cyberark' ],
+                            DEV: [ IV2: 'IV2CFOCUS-OPSD', IV1: 'AIM-FOCUS-APAC-OPSD' ]
+                        ]
+                    ]
+
+                    env.cyberarkCertFile = certificateMap[params.REGION][params.ENVIRONMENT_TYPE][params.INFRA_TYPE]
+                    env.cyberarkKeyFile  = certificateMap[params.REGION][params.ENVIRONMENT_TYPE][params.INFRA_TYPE]
+                }
+            }
+        }
+
+
+        stage('Select Correct Regional Artifactory Token') {
+            steps {
+                script {
+
+                    if (params.REGION == 'AMER') {
+                        withCredentials([string(credentialsId: "Artifactory_AMER_Key", variable: 'Artifactory_Key')]) {
+                            env.Artifactory_Key = Artifactory_Key
+                        }
+                        env.Base_Artifactory_URL = "https://artifactory-amer.cib.echonet"
+                    }
+
+                    else if (params.REGION == 'APAC') {
+                        withCredentials([string(credentialsId: "Artifactory_APAC_Key", variable: 'Artifactory_Key')]) {
+                            env.Artifactory_Key = Artifactory_Key
+                        }
+                        env.Base_Artifactory_URL = "https://artifactory-apac.cib.echonet"
+                    }
+
+                    else { // EMEA
+                        withCredentials([string(credentialsId: "Artifactory_EMEA_Key", variable: 'Artifactory_Key')]) {
+                            env.Artifactory_Key = Artifactory_Key
+                        }
+                        env.Base_Artifactory_URL = "https://artifactory-emea.cib.echonet"
+                    }
+                }
+            }
+        }
+
+
+        stage('Checkout Repository') {
+            steps {
+                git(
+                    url: 'https://bitbucket.cib.echonet/scm/focus/focus-ansible.git',
+                    branch: 'master',
+                    credentialsId: 'bitbucket_creds'
+                )
+            }
+        }
+
+
+        stage('Deploy Samson Via Ansible') {
+            steps {
+                script {
+                    sh """
+                        ansible-playbook -i inventory/${params.REGION}/${params.ENVIRONMENT_TYPE}/hosts \
+                        playbooks/samson_deploy.yml \
+                            -e REGION=${params.REGION} \
+                            -e ENVIRONMENT_TYPE=${params.ENVIRONMENT_TYPE} \
+                            -e INFRA_TYPE=${params.INFRA_TYPE} \
+                            -e SAMSON_VERSION=${params.SAMSON_VERSION} \
+                            -e ARTIFACTORY_TOKEN=${env.Artifactory_Key} \
+                            -e ARTIFACTORY_URL=${env.Base_Artifactory_URL} \
+                            -e CERT_FILE=${env.cyberarkCertFile} \
+                            -e KEY_FILE=${env.cyberarkKeyFile}
+                    """
+                }
+            }
+        }
+    }
+}
