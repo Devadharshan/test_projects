@@ -1,0 +1,62 @@
+pipeline {
+
+    agent any
+
+    parameters {
+        choice(name: 'REGION', choices: ['EMEA', 'AMER', 'APAC'], description: 'Deployment Region')
+        choice(name: 'ENVIRONMENT_TYPE', choices: ['PRD', 'STG', 'DEV'], description: 'Environment Type')
+        string(name: 'HOST_VALUES', defaultValue: '', description: 'Hostnames from inventory to deploy')
+        string(name: 'SAMSON_VERSION', defaultValue: 'latest', description: 'Version to deploy')
+    }
+
+    stages {
+
+        stage('Select Certificates') {
+            steps {
+                script {
+
+                    def certificateMap = [
+                        EMEA: [
+                            PRD: [ IV2:'IV2AFOCUS-OPSP', IV1:'AIM-IV1FOCUS-OPSP-EMEA-Cyberark' ],
+                            STG: [ IV2:'IV2AFOCUS-OPSP', IV1:'AIM-IV1FOCUS-OPSP-EMEA-Cyberark' ],
+                            DEV: [ IV2:'IV2AFOCUS-OPSD', IV1:'AIM-FOCUS-OPSD-Cyberark' ]
+                        ],
+
+                        AMER: [
+                            PRD: [ IV2:'IV2RFOCUS-OPSP', IV1:'AIM-FOCUS-NAR-OPSP-Cyberark' ],
+                            STG: [ IV2:'IV2RFOCUS-OPSP', IV1:'AIM-FOCUS-NAR-OPSP-Cyberark' ],
+                            DEV: [ IV2:'IV2RFOCUS-OPSD', IV1:'AIM-FOCUS-NAR-OPSD' ]
+                        ],
+
+                        APAC: [
+                            PRD: [ IV2:'IV2CFOCUS-OPSP', IV1:'AIM-FOCUS-APAC-OPSP-Cyberark' ],
+                            STG: [ IV2:'IV2CFOCUS-OPSP', IV1:'AIM-FOCUS-APAC-OPSP-Cyberark' ],
+                            DEV: [ IV2:'IV2CFOCUS-OPSD', IV1:'AIM-FOCUS-APAC-OPSD' ]
+                        ]
+                    ]
+
+                    // using IV1 always since INFRA_TYPE removed
+                    env.cyberarkCertFile = certificateMap[params.REGION][params.ENVIRONMENT_TYPE]['IV1']
+                    env.cyberarkKeyFile  = certificateMap[params.REGION][params.ENVIRONMENT_TYPE]['IV1']
+                }
+            }
+        }
+
+        stage('Run Samson Deploy') {
+            steps {
+                script {
+                    sh """
+                        ansible-playbook ansible/playbooks/deploy_samson.yml \
+                            -i ansible/inventories/${params.ENVIRONMENT_TYPE}/hosts \
+                            -e REGION=${params.REGION} \
+                            -e ENVIRONMENT_TYPE=${params.ENVIRONMENT_TYPE} \
+                            -e HOST_VALUES="${params.HOST_VALUES}" \
+                            -e SAMSON_VERSION=${params.SAMSON_VERSION} \
+                            -e CERT_FILE=${env.cyberarkCertFile} \
+                            -e KEY_FILE=${env.cyberarkKeyFile}
+                    """
+                }
+            }
+        }
+    }
+}
