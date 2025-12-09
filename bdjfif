@@ -1,0 +1,17 @@
+stage('Run Samson Deploy') {
+    steps {
+        dir('ansible') {
+            sh """
+                ansible-playbook \
+                    -i inventories/${ENVIRONMENT_TYPE}/hosts \
+                    playbooks/deply_samson.yml \
+                    -e REGION=${REGION} \
+                    -e ENVIRONMENT_TYPE=${ENVIRONMENT_TYPE} \
+                    -e HOST_VALUES=${HOST_VALUES} \
+                    -e SAMSON_VERSION=${SAMSON_VERSION} \
+                    -e CERT_FILE=${CERT_FILE} \
+                    -e KEY_FILE=${KEY_FILE}
+            """
+        }
+    }
+}
