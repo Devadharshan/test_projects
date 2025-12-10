@@ -1,0 +1,102 @@
+def cyberarkCAFile = "CA_Bundle.pem"   // Not used for PSRP but kept as placeholder
+
+// ----------------------------------------------------------------------
+// CERTIFICATE MAP (Used to select CyberArk credential name only)
+// ----------------------------------------------------------------------
+Map certificateMap = [
+    EMEA: [
+        PRD: [ IV2: 'IV2AFOCUS-OPSP' ],
+        STG: [ IV2: 'IV2AFOCUS-OPSP' ],
+        DEV: [ IV2: 'IV2AFOCUS-OPSD' ]
+    ],
+    AMER: [
+        PRD: [ IV2: 'IV2RFOCUS-OPSP' ],
+        STG: [ IV2: 'IV2RFOCUS-OPSP' ],
+        DEV: [ IV2: 'IV2RFOCUS-OPSD' ]
+    ],
+    APAC: [
+        PRD: [ IV2: 'IV2CFOCUS-OPSP' ],
+        STG: [ IV2: 'IV2CFOCUS-OPSP' ],
+        DEV: [ IV2: 'IV2CFOCUS-OPSD' ]
+    ]
+]
+
+
+pipeline {
+
+    agent any
+
+    parameters {
+        choice(name: 'REGION', choices: ['EMEA','AMER','APAC'], description: 'Region to deploy')
+        choice(name: 'ENVIRONMENT_TYPE', choices: ['STG','PRD','DEV'], description: 'Environment Type')
+        string(name: 'SAMSON_VERSION', defaultValue: 'latest', description: 'Version of Samson to deploy')
+    }
+
+    stages {
+
+        // 1️⃣ Select CyberArk Credential Name (from certificateMap)
+        stage('Select CyberArk Credential') {
+            steps {
+                script {
+                    env.opsCredential = certificateMap[params.REGION][params.ENVIRONMENT_TYPE]['IV2']
+                    echo "CyberArk Credential Selected: ${env.opsCredential}"
+                }
+            }
+        }
+
+        // 2️⃣ Select Regional Artifactory Token
+        stage('Select Regional Artifactory Token') {
+            steps {
+                script {
+                    if(params.REGION == 'AMER') {
+                        withCredentials([string(credentialsId: "Artifactory_AMER_Key", variable: 'Artifactory_Key')]) {
+                            env.Artifactory_Key = Artifactory_Key
+                        }
+                        env.Base_Artifactory_URL = "https://artifactory-amer.cib.echonet"
+
+                    } else if(params.REGION == 'APAC') {
+                        withCredentials([string(credentialsId: "Artifactory_APAC_Key", variable: 'Artifactory_Key')]) {
+                            env.Artifactory_Key = Artifactory_Key
+                        }
+                        env.Base_Artifactory_URL = "https://artifactory-apac.cib.echonet"
+
+                    } else {
+                        withCredentials([string(credentialsId: "Artifactory_Key", variable: 'Artifactory_Key')]) {
+                            env.Artifactory_Key = Artifactory_Key
+                        }
+                        env.Base_Artifactory_URL = "https://artifactory.cib.echonet"
+                    }
+                }
+            }
+        }
+
+        // 3️⃣ Declare Hosts
+        stage('Declare Hosts') {
+            steps {
+                echo "Using inventory: ansible/invetories/${params.ENVIRONMENT_TYPE}/hosts"
+            }
+        }
+
+        // 4️⃣ Run Samson Deployment (PSRP + CyberArk lookup)
+        stage('Run Samson Deployment') {
+            steps {
+                script {
+
+                    sh """
+                        cd ansible
+
+                        ansible-playbook \
+                            -i invetories/${ENVIRONMENT_TYPE}/hosts \
+                            playbooks/deply_samson.yml \
+                            -e REGION=${REGION} \
+                            -e ENVIRONMENT_TYPE=${ENVIRONMENT_TYPE} \
+                            -e SAMSON_VERSION=${SAMSON_VERSION} \
+                            -e ARTIFACTORY_KEY=${Artifactory_Key} \
+                            -e ARTIFACTORY_URL=${Base_Artifactory_URL} \
+                            -e ops_credential=${opsCredential}
+                    """
+                }
+            }
+        }
+    }
+}
