@@ -1,0 +1,79 @@
+pipeline {
+
+    agent any
+
+    parameters {
+        choice(name: 'REGION', choices: ['EMEA', 'AMER', 'APAC'], description: 'Deployment Region')
+        choice(name: 'ENVIRONMENT_TYPE', choices: ['STG', 'PRD', 'DEV'], description: 'Environment Type')
+        string(name: 'SAMSON_VERSION', defaultValue: 'latest', description: 'Samson Version to deploy')
+    }
+
+    environment {
+        CA_FILE_ID = 'CA_Bundle.pem'           // CA bundle (file credential)
+        ARTIFACTORY_TOKEN_ID = 'Artifactory_Token'   // <-- Your single Artifactory token credential
+    }
+
+    stages {
+
+        stage('Select Certificates') {
+            steps {
+                script {
+
+                    // EXACT SAMPLE-STYLE certificate map
+                    def certificateMap = [
+                        EMEA: [
+                            STG: [ cert: 'IV2AFOCUS-OPSP', key: 'IV2AFOCUS-OPSP' ],
+                            PRD: [ cert: 'IV2AFOCUS-OPSP', key: 'IV2AFOCUS-OPSP' ],
+                            DEV: [ cert: 'IV2AFOCUS-OPSD', key: 'IV2AFOCUS-OPSD' ]
+                        ],
+                        AMER: [
+                            STG: [ cert: 'IV2RFOCUS-OPSP', key: 'IV2RFOCUS-OPSP' ],
+                            PRD: [ cert: 'IV2RFOCUS-OPSP', key: 'IV2RFOCUS-OPSP' ],
+                            DEV: [ cert: 'IV2RFOCUS-OPSD', key: 'IV2RFOCUS-OPSD' ]
+                        ],
+                        APAC: [
+                            STG: [ cert: 'IV2CFOCUS-OPSP', key: 'IV2CFOCUS-OPSP' ],
+                            PRD: [ cert: 'IV2CFOCUS-OPSP', key: 'IV2CFOCUS-OPSP' ],
+                            DEV: [ cert: 'IV2CFOCUS-OPSD', key: 'IV2CFOCUS-OPSD' ]
+                        ]
+                    ]
+
+                    def selected = certificateMap[params.REGION][params.ENVIRONMENT_TYPE]
+
+                    env.CERT_ID = selected.cert
+                    env.KEY_ID  = selected.key
+                }
+            }
+        }
+
+        stage('Deploy Samson') {
+            steps {
+                script {
+
+                    withCredentials([
+                        file(credentialsId: env.CERT_ID, variable: 'CERT_FILE'),
+                        file(credentialsId: env.KEY_ID,  variable: 'KEY_FILE'),
+                        file(credentialsId: env.CA_FILE_ID, variable: 'CA_FILE'),
+                        string(credentialsId: env.ARTIFACTORY_TOKEN_ID, variable: 'ART_KEY')
+                    ]) {
+
+                        sh """
+                            cd ansible
+
+                            ansible-playbook \
+                              -i invetories/${params.ENVIRONMENT_TYPE}/hosts \
+                              playbooks/deply_samson.yml \
+                              -e REGION=${params.REGION} \
+                              -e ENVIRONMENT_TYPE=${params.ENVIRONMENT_TYPE} \
+                              -e SAMSON_VERSION=${params.SAMSON_VERSION} \
+                              -e CERT_FILE=${CERT_FILE} \
+                              -e KEY_FILE=${KEY_FILE} \
+                              -e CA_FILE=${CA_FILE} \
+                              -e ARTIFACTORY_KEY=${ART_KEY}
+                        """
+                    }
+                }
+            }
+        }
+    }
+}
