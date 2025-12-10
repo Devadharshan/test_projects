@@ -1,0 +1,25 @@
+---
+ansible_connection: psrp
+ansible_port: 5986
+ansible_psrp_cert_validation: ignore
+ansible_psrp_connection_timeout: 300
+ansible_psrp_operation_timeout: 300
+ansible_psrp_read_timeout: 300
+
+ansible_user: >-
+  {{ lookup('cyberark',
+      'safe=' ~ safe,
+      'appid=' ~ appid,
+      'credential_name=' ~ ops_credential,
+      'region=' ~ region,
+      'field=username'
+  ) }}
+
+ansible_password: >-
+  {{ lookup('cyberark',
+      'safe=' ~ safe,
+      'appid=' ~ appid,
+      'credential_name=' ~ ops_credential,
+      'region=' ~ region,
+      'field=password'
+  ) }}
