@@ -1,0 +1,19 @@
+[IV2-STG-WIN-EMEA]
+eurvoii48792.xmp.net.intra
+
+[IV2-STG-WIN-EMEA:vars]
+ansible_connection=psrp
+ansible_port=5986
+ansible_psrp_cert_validation=ignore
+ansible_psrp_connection_timeout=300
+ansible_psrp_operation_timeout=300
+ansible_psrp_read_timeout=300
+
+# CyberArk values — MUST align with Jenkins certificateMap
+safe=FOCUS_SAMSON_SAFE_STG
+appid=FOCUS_JENKINS_APPID
+ops_credential=IV2AFOCUS-OPSP
+region=EMEA
+
+ansible_user="{{ lookup('cyberark', 'safe={{ safe }};appid={{ appid }};credential={{ ops_credential }};region={{ region }};field=username;') }}"
+ansible_password="{{ lookup('cyberark', 'safe={{ safe }};appid={{ appid }};credential={{ ops_credential }};region={{ region }};field=password;') }}"
