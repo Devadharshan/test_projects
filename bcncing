@@ -1,0 +1,38 @@
+---
+#ansible_connection: winrm
+#ansible_port: 5986
+#ansible_winrm_server_cert_validation: ignore
+#ansible_winrm_transport: ntlm
+#ansible_winrm_operation_timeout_sec: 280
+#ansible_winrm_read_timeout_sec: 300
+
+ansible_user: '{{ lookup("cyberark",
+                     "safe=" ~ safe ~
+                     ";appid=" ~ appid ~
+                     ";credential=" ~ ops_credential ~
+                     ";region=" ~ region ~
+                     ";field=username"
+                     ";ca=" ~ cyberark_ca ~
+                     ";cert=" ~ cyberark_cert ~
+                     ";key=" ~ cyberark_key ) }}'
+
+ansible_password: '{{ lookup("cyberark",
+                     "safe=" ~ safe ~
+                     ";appid=" ~ appid ~
+                     ";credential=" ~ ops_credential ~
+                     ";region=" ~ region ~
+                     ";field=password"
+                     ";ca=" ~ cyberark_ca ~
+                     ";cert=" ~ cyberark_cert ~
+                     ";key=" ~ cyberark_key ) }}'
+
+# Migration from winrm to psrp
+ansible_port: 5986
+ansible_connection: psrp
+ansible_psrp_cert_validation: ignore
+ansible_psrp_connection_timeout: 300
+ansible_psrp_operation_timeout: 300
+ansible_psrp_read_timeout: 300
+
+
+
