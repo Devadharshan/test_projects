@@ -1,0 +1,67 @@
+---
+- name: Deploy Samson
+  hosts: samson
+  gather_facts: yes
+
+  vars:
+    samson_version: "{{ SAMSON_VERSION }}"
+    samson_artifactory_baseurl: "{{ ARTIFACTORY_URL }}"
+    arti_api_token: "{{ ARTIFACTORY_KEY }}"
+
+    cert_file: "{{ CERT_FILE }}"
+    key_file: "{{ KEY_FILE }}"
+    ca_file: "{{ CA_FILE }}"
+
+  roles:
+    - ansible-role-samson
+
+
+
+
+
+
+[defaults]
+inventory = invetories
+retry_files_enabled = False
+host_key_checking = False
+timeout = 60
+
+[winrm]
+transport = certificate
+server_cert_validation = ignore
+
+
+
+
+
+[samson]
+eurvoii48792.xmp.net.intra
+
+[samson:vars]
+ansible_connection=winrm
+ansible_port=5986
+ansible_winrm_transport=certificate
+ansible_winrm_server_cert_validation=ignore
+ansible_winrm_cert_pem="{{ CERT_FILE }}"
+ansible_winrm_cert_key_pem="{{ KEY_FILE }}"
+ansible_winrm_ca_trust_path="{{ CA_FILE }}"
+
+
+
+
+
+---
+- name: Test WinRM Certificate Login
+  hosts: samson
+  gather_facts: no
+
+  tasks:
+    - name: Run whoami
+      win_command: whoami
+
+
+
+ansible-playbook -i invetories/STG/hosts playbooks/test_winrm.yml \
+  -e CERT_FILE=xxx -e KEY_FILE=xxx -e CA_FILE=xxx
+
+
