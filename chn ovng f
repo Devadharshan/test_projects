@@ -1,0 +1,47 @@
+---
+# Global PSRP configuration
+ansible_connection: psrp
+ansible_port: 5986
+ansible_psrp_cert_validation: ignore
+ansible_psrp_connection_timeout: 300
+ansible_psrp_operation_timeout: 300
+ansible_psrp_read_timeout: 300
+
+# CyberArk lookup for Windows host credentials
+ansible_user: >-
+  {{ lookup('cyberark',
+      'user=' ~ cyberark_user ~
+      ' password=' ~ cyberark_password ~
+      ' appid=' ~ appid ~
+      ' safe=' ~ safe ~
+      ' credential=' ~ ops_credential ~
+      ' field=username'
+  ) }}
+
+ansible_password: >-
+  {{ lookup('cyberark',
+      'user=' ~ cyberark_user ~
+      ' password=' ~ cyberark_password ~
+      ' appid=' ~ appid ~
+      ' safe=' ~ safe ~
+      ' credential=' ~ ops_credential ~
+      ' field=password'
+  ) }}
+
+
+
+---
+- name: Deploy Samson to Windows servers
+  hosts: all
+  gather_facts: no
+
+  vars:
+    samson_version: "{{ SAMSON_VERSION }}"
+    artifactory_token: "{{ ARTIFACTORY_KEY }}"
+    artifactory_url: "{{ ARTIFACTORY_URL }}"
+    cyberark_cert: "{{ cyberark_cert }}"
+    cyberark_key: "{{ cyberark_key }}"
+    cyberark_ca: "{{ cyberark_ca }}"
+
+  roles:
+    - role: ansible-role-samson
