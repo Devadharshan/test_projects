@@ -1,0 +1,16 @@
+---
+- hosts: all
+  gather_facts: no
+
+  pre_tasks:
+    - name: Show variables passed from Jenkins
+      debug:
+        msg:
+          - "Samson version: {{ SAMSON_VERSION }}"
+          - "Region: {{ REGION }}"
+          - "Environment type: {{ ENVIRONMENT_TYPE }}"
+          - "Artifactory URL: {{ ARTIFACTORY_URL }}"
+          - "Artifactory Key Provided: {{ ARTIFACTORY_KEY is defined }}"
+
+  roles:
+    - ansible-role-samson
