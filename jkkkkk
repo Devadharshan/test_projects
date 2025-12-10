@@ -1,0 +1,26 @@
+---
+- name: Deploy Samson to Windows servers
+  hosts: all
+  gather_facts: no
+
+  vars:
+    ansible_os_family: "Windows"
+
+    # Version from Jenkins parameter
+    samson_version: "{{ SAMSON_VERSION }}"
+
+    # Role-required variables
+    samson_artifactory_baseurl: "{{ ARTIFACTORY_URL }}"
+    samson_artifactory_url: "{{ ARTIFACTORY_URL }}/samson/{{ SAMSON_VERSION }}"
+    samson_archive_name: "samson-{{ samson_version }}"
+
+    # Fix for typo in role: artl_api_token
+    artl_api_token: "{{ ARTIFACTORY_KEY }}"
+
+    # CyberArk certificate-based authentication
+    cyberark_cert: "{{ cyberark_cert }}"
+    cyberark_key: "{{ cyberark_key }}"
+    cyberark_ca: "{{ cyberark_ca }}"
+
+  roles:
+    - ansible-role-samson
