@@ -1,0 +1,123 @@
+pipeline {
+
+    agent any
+
+    parameters {
+        choice(name: 'REGION', choices: ['EMEA','AMER','APAC'], description: 'Region')
+        choice(name: 'ENVIRONMENT_TYPE', choices: ['STG','PRD','DEV'], description: 'Environment Type')
+        string(name: 'SAMSON_VERSION', defaultValue: 'latest', description: 'Samson Version to Deploy')
+    }
+
+    stages {
+
+        /* -------------------------------------------------------------------
+            1. CERTIFICATE SELECTION (EXACT SAMPLE STYLE)
+        ------------------------------------------------------------------- */
+        stage('Select Certificates Based on Region/Environment') {
+            steps {
+                script {
+
+                    def cyberarkCAFile = 'CA_Bundle.pem'
+
+                    Map certificateMap = [
+                        EMEA: [
+                            PRD: [ IV2: 'IV2AFOCUS-OPSP',
+                                   IV1: 'AIM-IV1FOCUS-OPSP-EMEA-Cyberark' ],
+                            STG: [ IV2: 'IV2AFOCUS-OPSP',
+                                   IV1: 'AIM-IV1FOCUS-OPSP-EMEA-Cyberark' ],
+                            DEV: [ IV2: 'IV2AFOCUS-OPSD',
+                                   IV1: 'AIM-FOCUS-OPSD-Cyberark' ]
+                        ],
+
+                        AMER: [
+                            PRD: [ IV2: 'IV2RFOCUS-OPSP',
+                                   IV1: 'AIM-FOCUS-NAR-OPSP-Cyberark' ],
+                            STG: [ IV2: 'IV2RFOCUS-OPSP',
+                                   IV1: 'AIM-FOCUS-NAR-OPSP-Cyberark' ],
+                            DEV: [ IV2: 'IV2RFOCUS-OPSD',
+                                   IV1: 'AIM-FOCUS-NAR-OPSD' ]
+                        ],
+
+                        APAC: [
+                            PRD: [ IV2: 'IV2CFOCUS-OPSP',
+                                   IV1: 'AIM-FOCUS-APAC-OPSP-Cyberark' ],
+                            STG: [ IV2: 'IV2CFOCUS-OPSP',
+                                   IV1: 'AIM-FOCUS-APAC-OPSP-Cyberark' ],
+                            DEV: [ IV2: 'IV2CFOCUS-OPSD',
+                                   IV1: 'AIM-FOCUS-APAC-OPSD' ]
+                        ]
+                    ]
+
+                    // ALWAYS USE IV2 for Samson deployments
+                    cyberarkCertFile = certificateMap[params.REGION][params.ENVIRONMENT_TYPE].IV2
+                    cyberarkKeyFile  = certificateMap[params.REGION][params.ENVIRONMENT_TYPE].IV2
+
+                    // CA bundle is global
+                    cyberarkCAFile = 'CA_Bundle.pem'
+                }
+            }
+        }
+
+        /* -------------------------------------------------------------------
+            2. ARTIFACTORY TOKEN SELECTION (EXACT SAMPLE STYLE)
+        ------------------------------------------------------------------- */
+        stage('Select Correct Regional Artifactory Token') {
+            steps {
+                script {
+
+                    if (params.REGION == 'AMER') {
+                        withCredentials([string(credentialsId: "Artifactory_AMER_Key", variable: 'Artifactory_Key')]) {
+                            env.Artifactory_Key = Artifactory_Key
+                        }
+                        env.Base_Artifactory_URL = "https://artifactory-amer.cib.echonet"
+                    }
+                    else if (params.REGION == 'APAC') {
+                        withCredentials([string(credentialsId: "Artifactory_APAC_Key", variable: 'Artifactory_Key')]) {
+                            env.Artifactory_Key = Artifactory_Key
+                        }
+                        env.Base_Artifactory_URL = "https://artifactory-apac.cib.echonet"
+                    }
+                    else { // EMEA
+                        withCredentials([string(credentialsId: "Artifactory_EMEA_Key", variable: 'Artifactory_Key')]) {
+                            env.Artifactory_Key = Artifactory_Key
+                        }
+                        env.Base_Artifactory_URL = "https://artifactory-emea.cib.echonet"
+                    }
+                }
+            }
+        }
+
+        /* -------------------------------------------------------------------
+            3. RUN ANSIBLE (EXACT SAMPLE STYLE)
+        ------------------------------------------------------------------- */
+        stage('Run Ansible') {
+            steps {
+                script {
+
+                    withCredentials([
+                        file(credentialsId: "${cyberarkCertFile}", variable: 'cyberarkCert'),
+                        file(credentialsId: "${cyberarkKeyFile}", variable: 'cyberarkKey'),
+                        file(credentialsId: "CA_Bundle.pem", variable: 'cyberarkCA')
+                    ]) {
+
+                        sh """
+                            cd ansible
+
+                            ansible-playbook \
+                                -i invetories/${params.ENVIRONMENT_TYPE}/hosts \
+                                playbooks/deply_samson.yml \
+                                -e REGION="${params.REGION}" \
+                                -e ENVIRONMENT_TYPE="${params.ENVIRONMENT_TYPE}" \
+                                -e SAMSON_VERSION="${params.SAMSON_VERSION}" \
+                                -e CERT_FILE="${cyberarkCert}" \
+                                -e KEY_FILE="${cyberarkKey}" \
+                                -e CA_FILE="${cyberarkCA}" \
+                                -e ARTIFACTORY_URL="${Base_Artifactory_URL}" \
+                                -e ARTIFACTORY_KEY="${Artifactory_Key}"
+                        """
+                    }
+                }
+            }
+        }
+    }
+}
