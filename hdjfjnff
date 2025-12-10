@@ -1,0 +1,32 @@
+  vars:
+    ansible_os_family: "Windows"
+
+    # Jenkins-provided
+    samson_version: "{{ SAMSON_VERSION }}"
+
+    # Artifactory base & path (ensure ARTIFACTORY_URL is passed from Jenkins)
+    samson_artifactory_baseurl: "{{ ARTIFACTORY_URL }}"
+    samson_artifactory_url: "{{ ARTIFACTORY_URL }}/samson/{{ SAMSON_VERSION }}"
+    samson_archive_name: "samson-{{ samson_version }}"
+
+    # Artifactory token aliases (so role finds the token regardless of variable name)
+    artl_api_token: "{{ ARTIFACTORY_KEY }}"
+    arti_api_token: "{{ ARTIFACTORY_KEY }}"
+    artifactory_api_token: "{{ ARTIFACTORY_KEY }}"
+    artifactory_key: "{{ ARTIFACTORY_KEY }}"
+    arti_token: "{{ ARTIFACTORY_KEY }}"
+
+    # CyberArk certs passed from Jenkins (files)
+    cyberark_cert: "{{ cyberark_cert }}"
+    cyberark_key: "{{ cyberark_key }}"
+    cyberark_ca: "{{ cyberark_ca }}"
+
+    # ----------------------------
+    # QUICK FIX (Option A): svc user alias
+    # If you already have svcaccount in group_vars, map it to samson_svc_user
+    # If samson_svc_user is already provided elsewhere this keeps it unchanged.
+    # samson_svc_password defaults to empty string to avoid "undefined" errors.
+    # Replace or remove later when moving to CyberArk-managed svc password.
+    # ----------------------------
+    samson_svc_user: "{{ svcaccount | default(samson_svc_user | default('')) }}"
+    samson_svc_password: "{{ samson_svc_password | default('') }}"
