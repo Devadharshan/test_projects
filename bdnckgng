@@ -1,0 +1,161 @@
+def cyberarkCAFile = "CA_Bundle.pem"   // Jenkins credential ID for CyberArk CA bundle
+
+// Certificate map for IV2 (Samson servers)
+Map certificateMap = [
+    EMEA: [
+        PRD: [ IV2: 'IV2AFOCUS-OPSP', IV1: 'AIM-IV1FOCUS-OPSP-EMEA-Cyberark' ],
+        STG: [ IV2: 'IV2AFOCUS-OPSP', IV1: 'AIM-IV1FOCUS-OPSP-EMEA-Cyberark' ],
+        DEV: [ IV2: 'IV2AFOCUS-OPSD', IV1: 'AIM-FOCUS-OPSD-Cyberark' ]
+    ],
+
+    AMER: [
+        PRD: [ IV2: 'IV2RFOCUS-OPSP', IV1: 'AIM-FOCUS-NAR-OPSP-Cyberark' ],
+        STG: [ IV2: 'IV2RFOCUS-OPSP', IV1: 'AIM-FOCUS-NAR-OPSP-Cyberark' ],
+        DEV: [ IV2: 'IV2RFOCUS-OPSD', IV1: 'AIM-FOCUS-NAR-OPSD' ]
+    ],
+
+    APAC: [
+        PRD: [ IV2: 'IV2CFOCUS-OPSP', IV1: 'AIM-FOCUS-APAC-OPSP-Cyberark' ],
+        STG: [ IV2: 'IV2CFOCUS-OPSP', IV1: 'AIM-FOCUS-APAC-OPSP-Cyberark' ],
+        DEV: [ IV2: 'IV2CFOCUS-OPSD', IV1: 'AIM-FOCUS-APAC-OPSD' ]
+    ]
+]
+
+pipeline {
+
+    agent {
+        label params.REGION == "EMEA" ? 'bnpp-deploytools' :
+              params.REGION == "APAC" ? 'bnpp-deploytools-apac' :
+              params.REGION == "AMER" ? 'bnpp-deploytools-amer' :
+              params.REGION
+    }
+
+    parameters {
+
+        choice(name: 'REGION', choices: ['EMEA','AMER','APAC'], description: 'Region')
+        choice(name: 'ENVIRONMENT_TYPE', choices: ['STG','PRD','DEV'], description: 'Environment Type')
+
+        string(name: 'SAMSON_VERSION', defaultValue: 'latest', description: 'Version of Samson to deploy')
+
+        text(name: 'HOST_VALUES', description: 'Host(s) to deploy Samson')
+    }
+
+    environment {
+        SHARED_BITBUCKET_SSH_KEY = "BITBUCKET_public_access_auth_usr"
+    }
+
+    stages {
+
+        /*******************************
+         * 1. SELECT CERTIFICATES BASED ON REGION / ENV
+         *******************************/
+        stage('Select Certificates') {
+            steps {
+                script {
+                    def certBase = certificateMap[ params.REGION ][ params.ENVIRONMENT_TYPE ]['IV2']
+                    env.cyberarkCertFile = certBase + ".crt"
+                    env.cyberarkKeyFile  = certBase + ".key"
+
+                    echo "Selected certificate/key: ${certBase}"
+                }
+            }
+        }
+
+        /*******************************
+         * 2. SELECT REGIONAL ARTIFACTORY TOKEN
+         *******************************/
+        stage('Select Artifactory Token') {
+            steps {
+                script {
+                    if(params.REGION == 'AMER') {
+
+                        withCredentials([string(credentialsId: "Artifactory_AMER_Key", variable: 'ArtToken')]) {
+                            env.Artifactory_Key = ArtToken
+                        }
+                        env.Base_Artifactory_URL = "https://artifactory-amer.cib.echonet"
+
+                    } else if(params.REGION == 'APAC') {
+
+                        withCredentials([string(credentialsId: "Artifactory_APAC_Key", variable: 'ArtToken')]) {
+                            env.Artifactory_Key = ArtToken
+                        }
+                        env.Base_Artifactory_URL = "https://artifactory-apac.cib.echonet"
+
+                    } else {
+
+                        withCredentials([string(credentialsId: "Artifactory_Key", variable: 'ArtToken')]) {
+                            env.Artifactory_Key = ArtToken
+                        }
+                        env.Base_Artifactory_URL = "https://artifactory.cib.echonet"
+                    }
+
+                    echo "Artifactory URL selected: ${env.Base_Artifactory_URL}"
+                }
+            }
+        }
+
+        /*******************************
+         * 3. DECLARE HOSTS (WRITE INVENTORY)
+         *******************************/
+        stage('Declare Hosts') {
+            steps {
+                script {
+
+                    if (!params.HOST_VALUES?.trim()) {
+                        error "HOST_VALUES cannot be empty!"
+                    }
+
+                    def hostGroup = "IV2-${ENVIRONMENT_TYPE}-WIN-${REGION}"
+                    def inventoryFile = "ansible/inventories/hosts.ini"
+
+                    sh """
+                        echo "[${hostGroup}]" > ${inventoryFile}
+                        echo "${HOST_VALUES}" >> ${inventoryFile}
+
+                        echo ""
+                        echo "===== INVENTORY WRITTEN ====="
+                        echo "Group: ${hostGroup}"
+                        echo "Host(s): ${HOST_VALUES}"
+                        echo "=============================="
+                        echo ""
+                    """
+
+                    currentBuild.displayName = "${ENVIRONMENT_TYPE}-${SAMSON_VERSION}-${BUILD_NUMBER}"
+                }
+            }
+        }
+
+        /*******************************
+         * 4. RUN ANSIBLE
+         *******************************/
+        stage('Run Ansible') {
+            steps {
+                script {
+
+                    withCredentials([
+                        file(credentialsId: "${cyberarkCertFile}", variable: 'cyberarkCert'),
+                        file(credentialsId: "${cyberarkKeyFile}",  variable: 'cyberarkKey'),
+                        file(credentialsId: "${cyberarkCAFile}",   variable: 'cyberarkCA')
+                    ]) {
+
+                        sh """
+                            cd ansible
+
+                            ansible-playbook \
+                                -i inventories/hosts.ini \
+                                playbooks/deploy_samson.yml \
+                                -e REGION="${REGION}" \
+                                -e ENVIRONMENT_TYPE="${ENVIRONMENT_TYPE}" \
+                                -e SAMSON_VERSION="${SAMSON_VERSION}" \
+                                -e ARTIFACTORY_KEY="${Artifactory_Key}" \
+                                -e ARTIFACTORY_URL="${Base_Artifactory_URL}" \
+                                -e cyberark_cert="${cyberarkCert}" \
+                                -e cyberark_key="${cyberarkKey}" \
+                                -e cyberark_ca="${cyberarkCA}"
+                        """
+                    }
+                }
+            }
+        }
+    }
+}
