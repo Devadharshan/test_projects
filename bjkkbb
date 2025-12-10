@@ -1,0 +1,137 @@
+def cyberarkCAFile = "CA_Bundle.pem"   // Not used for PSRP but kept for compatibility
+
+// ----------------------------------------------------------------------
+// CERTIFICATE MAP (Used only to choose CyberArk credential name)
+// ----------------------------------------------------------------------
+Map certificateMap = [
+    EMEA: [
+        PRD: [ IV2: 'IV2AFOCUS-OPSP' ],
+        STG: [ IV2: 'IV2AFOCUS-OPSP' ],
+        DEV: [ IV2: 'IV2AFOCUS-OPSD' ]
+    ],
+    AMER: [
+        PRD: [ IV2: 'IV2RFOCUS-OPSP' ],
+        STG: [ IV2: 'IV2RFOCUS-OPSP' ],
+        DEV: [ IV2: 'IV2RFOCUS-OPSD' ]
+    ],
+    APAC: [
+        PRD: [ IV2: 'IV2CFOCUS-OPSP' ],
+        STG: [ IV2: 'IV2CFOCUS-OPSP' ],
+        DEV: [ IV2: 'IV2CFOCUS-OPSD' ]
+    ]
+]
+
+
+pipeline {
+
+    agent any
+
+    parameters {
+        choice(name: 'REGION', choices: ['EMEA','AMER','APAC'], description: 'Region')
+        choice(name: 'ENVIRONMENT_TYPE', choices: ['STG','PRD','DEV'], description: 'Environment')
+        string(name: 'SAMSON_VERSION', defaultValue: 'latest', description: 'Samson Version')
+    }
+
+    stages {
+
+        // ----------------------------------------------------------------------
+        // 1️⃣ Select correct CyberArk credential name (NOT certificate files)
+        // ----------------------------------------------------------------------
+        stage('Select CyberArk Credential') {
+            steps {
+                script {
+                    env.opsCredential = certificateMap[params.REGION][params.ENVIRONMENT_TYPE]['IV2']
+                    echo "Using CyberArk Credential: ${env.opsCredential}"
+                }
+            }
+        }
+
+        // ----------------------------------------------------------------------
+        // 2️⃣ Select Artifactory Token (exact sample pipeline logic)
+        // ----------------------------------------------------------------------
+        stage('Select Correct Regional Artifactory Token') {
+            steps {
+                script {
+
+                    if(params.REGION == 'AMER') {
+                        withCredentials([string(credentialsId: "Artifactory_AMER_Key", variable: 'Artifactory_Key')]) {
+                            env.Artifactory_Key = Artifactory_Key
+                        }
+                        env.Base_Artifactory_URL = "https://artifactory-amer.cib.echonet"
+
+                    } else if(params.REGION == 'APAC') {
+                        withCredentials([string(credentialsId: "Artifactory_APAC_Key", variable: 'Artifactory_Key')]) {
+                            env.Artifactory_Key = Artifactory_Key
+                        }
+                        env.Base_Artifactory_URL = "https://artifactory-apac.cib.echonet"
+
+                    } else {
+                        withCredentials([string(credentialsId: "Artifactory_Key", variable: 'Artifactory_Key')]) {
+                            env.Artifactory_Key = Artifactory_Key
+                        }
+                        env.Base_Artifactory_URL = "https://artifactory.cib.echonet"
+                    }
+                }
+            }
+        }
+
+
+        // ----------------------------------------------------------------------
+        // 3️⃣ Declare Hosts (just informational, inventory will be used)
+        // ----------------------------------------------------------------------
+        stage('Declare Hosts') {
+            steps {
+                script {
+                    echo "Using Inventory File: invetories/${ENVIRONMENT_TYPE}/hosts"
+                }
+            }
+        }
+
+        // ----------------------------------------------------------------------
+        // 4️⃣ Install Galaxy Roles (OPTIONAL – uncomment if needed)
+        // ----------------------------------------------------------------------
+        stage('Install Base Build Role Using Ansible Galaxy') {
+            steps {
+                script {
+                    sh '''
+                        echo "Installing Ansible Roles from requirements.yml (if present)"
+                        mkdir -p /home/$USER/.ssh
+                        ssh-keyscan bitbucket.cib.echonet >> $HOME/.ssh/known_hosts || true
+                        ansible-galaxy install -r ./ansible/requirements.yml -p ./ansible/roles || true
+                    '''
+                }
+            }
+        }
+
+
+        // ----------------------------------------------------------------------
+        // 5️⃣ Run Ansible (PSRP + CyberArk Username/Password)
+        // ----------------------------------------------------------------------
+        stage('Run Samson Deployment') {
+            steps {
+                script {
+
+                    // These will be read by lookup plugin from your STG/PRD inventory file:
+                    // safe
+                    // appid
+                    // ops_credential (selected above)
+                    // region
+
+                    sh """
+                        cd ansible
+
+                        ansible-playbook \
+                            -i invetories/${ENVIRONMENT_TYPE}/hosts \
+                            playbooks/deply_samson.yml \
+                            -e REGION=${REGION} \
+                            -e ENVIRONMENT_TYPE=${ENVIRONMENT_TYPE} \
+                            -e SAMSON_VERSION=${SAMSON_VERSION} \
+                            -e ARTIFACTORY_KEY=${Artifactory_Key} \
+                            -e ARTIFACTORY_URL=${Base_Artifactory_URL} \
+                            -e ops_credential=${opsCredential}
+                    """
+                }
+            }
+        }
+    }
+}
