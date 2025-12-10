@@ -1,0 +1,123 @@
+pipeline {
+
+    agent any
+
+    parameters {
+        choice(name: 'REGION', choices: ['EMEA','AMER','APAC'], description: 'Deployment Region')
+        choice(name: 'ENVIRONMENT_TYPE', choices: ['STG','PRD','DEV'], description: 'Environment')
+        string(name: 'SAMSON_VERSION', defaultValue: 'latest', description: 'Samson Version to deploy')
+    }
+
+    environment {
+        cyberarkCAFile = 'CA_Bundle.pem'
+    }
+
+    stages {
+
+        /* ---------------------------------------------------------
+           1. SELECT CERTIFICATES (SAME STYLE AS SAMPLE)
+        --------------------------------------------------------- */
+        stage('Select Certificates') {
+            steps {
+                script {
+
+                    def certificateMap = [
+                        EMEA: [
+                            STG: [ cert: 'IV2AFOCUS-OPSP', key: 'IV2AFOCUS-OPSP' ],
+                            PRD: [ cert: 'IV2AFOCUS-OPSP', key: 'IV2AFOCUS-OPSP' ],
+                            DEV: [ cert: 'IV2AFOCUS-OPSD', key: 'IV2AFOCUS-OPSD' ]
+                        ],
+                        AMER: [
+                            STG: [ cert: 'IV2RFOCUS-OPSP', key: 'IV2RFOCUS-OPSP' ],
+                            PRD: [ cert: 'IV2RFOCUS-OPSP', key: 'IV2RFOCUS-OPSP' ],
+                            DEV: [ cert: 'IV2RFOCUS-OPSD', key: 'IV2RFOCUS-OPSD' ]
+                        ],
+                        APAC: [
+                            STG: [ cert: 'IV2CFOCUS-OPSP', key: 'IV2CFOCUS-OPSP' ],
+                            PRD: [ cert: 'IV2CFOCUS-OPSP', key: 'IV2CFOCUS-OPSP' ],
+                            DEV: [ cert: 'IV2CFOCUS-OPSD', key: 'IV2CFOCUS-OPSD' ]
+                        ]
+                    ]
+
+                    // set these EXACTLY like sample pipeline does
+                    cyberarkCertFile = certificateMap[params.REGION][params.ENVIRONMENT_TYPE].cert
+                    cyberarkKeyFile  = certificateMap[params.REGION][params.ENVIRONMENT_TYPE].key
+                }
+            }
+        }
+
+        /* ---------------------------------------------------------
+           2. SELECT CORRECT REGIONAL ARTIFACTORY TOKEN
+              (EXACTLY LIKE YOUR SAMPLE)
+        --------------------------------------------------------- */
+        stage('Select Correct Regional Artifactory Token') {
+            steps {
+                script {
+
+                    if (params.REGION == 'AMER') {
+                        withCredentials([string(credentialsId: "Artifactory_AMER_Key", variable: 'Artifactory_Key')]) {
+                            env.Artifactory_Key = Artifactory_Key
+                        }
+                        env.Base_Artifactory_URL = "https://artifactory-amer.cib.echonet"
+                    }
+                    else if (params.REGION == 'APAC') {
+                        withCredentials([string(credentialsId: "Artifactory_APAC_Key", variable: 'Artifactory_Key')]) {
+                            env.Artifactory_Key = Artifactory_Key
+                        }
+                        env.Base_Artifactory_URL = "https://artifactory-apac.cib.echonet"
+                    }
+                    else {  // EMEA
+                        withCredentials([string(credentialsId: "Artifactory_EMEA_Key", variable: 'Artifactory_Key')]) {
+                            env.Artifactory_Key = Artifactory_Key
+                        }
+                        env.Base_Artifactory_URL = "https://artifactory-emea.cib.echonet"
+                    }
+                }
+            }
+        }
+
+        /* ---------------------------------------------------------
+           3. DECLARE HOSTS (IF NEEDED)
+        --------------------------------------------------------- */
+        stage('Declare Hosts') {
+            steps {
+                script {
+                    echo "Using inventory: invetories/${params.ENVIRONMENT_TYPE}/hosts"
+                }
+            }
+        }
+
+        /* ---------------------------------------------------------
+           4. RUN ANSIBLE (EXACT STYLE AS SAMPLE)
+        --------------------------------------------------------- */
+        stage('Run Ansible') {
+            steps {
+                script {
+                    withCredentials([
+                        file(credentialsId: "${cyberarkCertFile}", variable: 'cyberarkCert'),
+                        file(credentialsId: "${cyberarkKeyFile}", variable: 'cyberarkKey'),
+                        file(credentialsId: "${cyberarkCAFile}", variable: 'cyberarkCA')
+                    ]) {
+
+                        sh """
+                            cd ansible
+
+                            ansible-playbook \
+                              -i invetories/${params.ENVIRONMENT_TYPE}/hosts \
+                              playbooks/deply_samson.yml \
+                              -e REGION="${params.REGION}" \
+                              -e ENVIRONMENT_TYPE="${params.ENVIRONMENT_TYPE}" \
+                              -e SAMSON_VERSION="${params.SAMSON_VERSION}" \
+                              -e CERT_FILE="${cyberarkCert}" \
+                              -e KEY_FILE="${cyberarkKey}" \
+                              -e CA_FILE="${cyberarkCA}" \
+                              -e ARTIFACTORY_URL="${Base_Artifactory_URL}" \
+                              -e ARTIFACTORY_KEY="${Artifactory_Key}"
+                        """
+                    }
+                }
+            }
+        }
+
+    } // stages
+} // pipeline
