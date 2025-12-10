@@ -1,0 +1,19 @@
+ansible_user: >-
+  {{ lookup('cyberark',
+      'user=' ~ cyberark_user ~
+      ' password=' ~ cyberark_password ~
+      ' appid=' ~ appid ~
+      ' safe=' ~ safe ~
+      ' credential=' ~ ops_credential ~
+      ' field=username'
+  ) }}
+
+ansible_password: >-
+  {{ lookup('cyberark',
+      'user=' ~ cyberark_user ~
+      ' password=' ~ cyberark_password ~
+      ' appid=' ~ appid ~
+      ' safe=' ~ safe ~
+      ' credential=' ~ ops_credential ~
+      ' field=password'
+  ) }}
