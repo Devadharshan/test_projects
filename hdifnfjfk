@@ -1,0 +1,33 @@
+stage('Run Ansible') {
+    steps {
+        script {
+
+            withCredentials([
+                file(credentialsId: "${cyberarkCertFile}", variable: 'cyberarkCert'),
+                file(credentialsId: "${cyberarkKeyFile}",  variable: 'cyberarkKey'),
+                file(credentialsId: "${cyberarkCAFile}",   variable: 'cyberarkCA')
+            ]) {
+
+                sh """
+                    cd ansible
+
+                    ansible-playbook \
+                      -i inventories/hosts.ini \
+                      playbooks/deploy_samson.yml \
+                      -e REGION="${REGION}" \
+                      -e ENVIRONMENT_TYPE="${ENVIRONMENT_TYPE}" \
+                      -e SAMSON_VERSION="${SAMSON_VERSION}" \
+                      -e ARTIFACTORY_KEY="${Artifactory_Key}" \
+                      -e ARTIFACTORY_URL="${Base_Artifactory_URL}" \
+                      -e arti_api_token="${Artifactory_Key}" \
+                      -e artl_api_token="${Artifactory_Key}" \
+                      -e artifactory_api_token="${Artifactory_Key}" \
+                      -e artifactory_key="${Artifactory_Key}" \
+                      -e cyberark_cert="${cyberarkCert}" \
+                      -e cyberark_key="${cyberarkKey}" \
+                      -e cyberark_ca="${cyberarkCA}"
+                """
+            }
+        }
+    }
+}
