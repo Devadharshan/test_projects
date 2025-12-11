@@ -1,0 +1,89 @@
+---
+- name: Deploy Samson to Windows servers
+  hosts: all
+  gather_facts: no
+
+  vars:
+    ansible_os_family: "Windows"
+
+    # ───────────────────────────────────────────────
+    # SAMSON VERSION (supports "latest")
+    # ───────────────────────────────────────────────
+    samson_version: "{{ SAMSON_VERSION | default('latest') }}"
+    samson_wire_env: "{{ ENVIRONMENT_TYPE | default('STG') }}"
+    samson_sublocation: "{{ host_location | default(region | default('LON')) }}"
+
+    # ───────────────────────────────────────────────
+    # Artifactory Base URL (MUST include /artifactory)
+    # ───────────────────────────────────────────────
+    samson_artifactory_baseurl: "{{ ARTIFACTORY_URL | default('https://artifactory.cib.echonet/artifactory') }}"
+
+    # Repo for Samson ZIPs
+    samson_repo: "sam-maven-local-release"
+
+    # ───────────────────────────────────────────────
+    # JDK config (This part remains SAME)
+    # ───────────────────────────────────────────────
+    _samson_jdk_version: "jdk-11.0.27"
+    samson_jdk_artifactory_url: >
+      {{ samson_artifactory_baseurl }}/external-generic-local/oracle/java/jdk/windows/{{ _samson_jdk_version }}_windows-x64_bin.zip
+
+    # ───────────────────────────────────────────────
+    # Artifactory API Token (all aliases supported)
+    # ───────────────────────────────────────────────
+    artifactory_key: "{{ ARTIFACTORY_KEY | default('') }}"
+    artl_api_token: "{{ ARTIFACTORY_KEY | default('') }}"
+    arti_api_token: "{{ ARTIFACTORY_KEY | default('') }}"
+    artifactory_api_token: "{{ ARTIFACTORY_KEY | default('') }}"
+
+    # ───────────────────────────────────────────────
+    # CyberArk certificates (from Jenkins)
+    # ───────────────────────────────────────────────
+    cyberark_cert: "{{ cyberark_cert | default('') }}"
+    cyberark_key: "{{ cyberark_key | default('') }}"
+    cyberark_ca: "{{ cyberark_ca | default('') }}"
+
+    # ───────────────────────────────────────────────
+    # Service Account
+    # ───────────────────────────────────────────────
+    samson_svc_user: "{{ samson_svc_user | default(svc_user | default(svcaccount | default(''))) }}"
+    svc_user: "{{ samson_svc_user }}"
+    samson_service_username: "{{ samson_svc_user }}"
+    samson_svc_password: "{{ samson_svc_password | default('') }}"
+
+  # ───────────────────────────────────────────────
+  # 🔥 PRE-TASKS: Resolve latest Samson version
+  # ───────────────────────────────────────────────
+  pre_tasks:
+
+    - name: Resolve latest Samson version when SAMSON_VERSION = latest
+      uri:
+        url: >-
+          {{ samson_artifactory_baseurl }}/api/search/latestVersion?g=com.bnpparibas.sam&a=samson&repos={{ samson_repo }}
+        method: GET
+        headers:
+          Authorization: "Bearer {{ artifactory_key }}"
+        return_content: yes
+        status_code: 200
+      register: latest_ver
+      when: samson_version == "latest"
+
+    - name: Set resolved latest version
+      set_fact:
+        samson_version: "{{ latest_ver.content | trim }}"
+      when: samson_version == "latest"
+
+    - name: Show final Samson version
+      debug:
+        msg: "Deploying Samson version: {{ samson_version }}"
+
+    # ───────────────────────────────────────────────
+    # Build final archive name and download path
+    # ───────────────────────────────────────────────
+  vars:
+    samson_archive_name: "Samson-{{ samson_version }}"
+    samson_artifactory_url: >-
+      {{ samson_artifactory_baseurl }}/{{ samson_repo }}/com/bnpparibas/sam/samson/{{ samson_version }}
+
+  roles:
+    - ansible-role-samson
