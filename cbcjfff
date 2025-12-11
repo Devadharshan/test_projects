@@ -1,0 +1,3 @@
+samson_domain: "{{ domain | default('euro') }}"
+samson_svc_user: "{{ samson_domain }}\\{{ svcaccount }}"
+samson_svc_password: "{{ samson_svc_password | default('') }}"
