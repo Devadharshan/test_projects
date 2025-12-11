@@ -1,0 +1,118 @@
+pipeline {
+  agent {
+    label params.REGION == "EMEA" ? 'bnpp-deploytools' :
+          params.REGION == "APAC" ? 'bnpp-deploytools-apac' :
+          params.REGION == "AMER" ? 'bnpp-deploytools-amer' : 'bnpp-deploytools'
+  }
+
+  parameters {
+    choice(name: 'REGION', choices: ['EMEA','AMER','APAC'], description: 'Select Region')
+    choice(name: 'ENVIRONMENT_TYPE', choices: ['DEV','STG','PRD'], description: 'Environment Type')
+    string(name: 'SAMSON_VERSION', defaultValue: 'latest', description: 'Samson version')
+  }
+
+  environment {
+    cyberarkCAFile = 'CA_Bundle.pem'
+  }
+
+  stages {
+
+    /* ----------------------------------------------------
+       SELECT CERTIFICATES FOR REGION + ENVIRONMENT
+    ---------------------------------------------------- */
+    stage('Select Certificates') {
+      steps {
+        script {
+          def certificateMap = [
+            EMEA: [
+              PRD: [IV2:'IV2AFOCUS-OPSP'],  STG:[IV2:'IV2AFOCUS-OPSP'],  DEV:[IV2:'IV2AFOCUS-OPSD']
+            ],
+            AMER: [
+              PRD: [IV2:'IV2RFOCUS-OPSP'],  STG:[IV2:'IV2RFOCUS-OPSP'],  DEV:[IV2:'IV2RFOCUS-OPSD']
+            ],
+            APAC: [
+              PRD: [IV2:'IV2CFOCUS-OPSP'],  STG:[IV2:'IV2CFOCUS-OPSP'],  DEV:[IV2:'IV2CFOCUS-OPSD']
+            ]
+          ]
+
+          env.cyberarkCertFile = certificateMap[params.REGION][params.ENVIRONMENT_TYPE].IV2 + ".crt"
+          env.cyberarkKeyFile  = certificateMap[params.REGION][params.ENVIRONMENT_TYPE].IV2 + ".key"
+
+          echo "Using certificate: ${env.cyberarkCertFile}, key: ${env.cyberarkKeyFile}, CA: ${env.cyberarkCAFile}"
+        }
+      }
+    }
+
+    /* ----------------------------------------------------
+       SHOW INVENTORY HOSTS (NO LIMITING)
+    ---------------------------------------------------- */
+    stage('Declare Hosts') {
+      steps {
+        script {
+          def invPath = "ansible/inventories/${params.ENVIRONMENT_TYPE}/hosts.ini"
+
+          sh """
+            echo "========= INVENTORY FILE ========="
+            cat ${invPath} || echo "(Inventory file missing!)"
+
+            echo ""
+            echo "========= INVENTORY GRAPH ========="
+            if command -v ansible-inventory >/dev/null 2>&1; then
+              ansible-inventory -i ${invPath} --graph || true
+            else
+              echo "ansible-inventory not available"
+            fi
+
+            echo ""
+            echo "========= HOST LIST ========="
+            awk '
+              /^\\[/ {group=\$0; next}
+              /^[#]/ {next}
+              /^[ \\t]*$/ {next}
+              { print group " => " \$0 }
+            ' ${invPath} || true
+          """
+        }
+      }
+    }
+
+    /* ----------------------------------------------------
+       RUN ANSIBLE PLAYBOOK
+    ---------------------------------------------------- */
+    stage('Run Ansible') {
+      steps {
+        script {
+
+          // RELEASE TYPE: DEV environments use DEV, STG+PRD use RELEASE
+          env.SAMSON_RELEASE_TYPE =
+            (params.ENVIRONMENT_TYPE == "DEV" ? "DEV" : "RELEASE")
+
+          withCredentials([
+            file(credentialsId: "${env.cyberarkCertFile}", variable: 'cyberarkCert'),
+            file(credentialsId: "${env.cyberarkKeyFile}",  variable: 'cyberarkKey'),
+            file(credentialsId: "${env.cyberarkCAFile}",   variable: 'cyberarkCA'),
+            string(credentialsId: 'Artifactory_Key', variable: 'Artifactory_Key')
+          ]) {
+
+            sh """
+              cd ansible
+
+              ansible-playbook -i inventories/${params.ENVIRONMENT_TYPE}/hosts.ini playbooks/deploy_samson.yml \\
+                -e SAMSON_VERSION="${params.SAMSON_VERSION}" \\
+                -e samson_release_type="${env.SAMSON_RELEASE_TYPE}" \\
+                -e samson_artifactory_baseurl="https://artifactory.cib.echonet/artifactory" \\
+                -e ARTIFACTORY_KEY="${Artifactory_Key}" \\
+                --extra-vars "cyberark_cert=${cyberarkCert} cyberark_key=${cyberarkKey} cyberark_ca=${cyberarkCA}"
+            """
+          }
+        }
+      }
+    }
+
+  }
+
+  post {
+    success { echo "Deployment completed successfully." }
+    failure { echo "Deployment failed." }
+  }
+}
