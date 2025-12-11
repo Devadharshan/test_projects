@@ -1,0 +1,17 @@
+vars:
+  ansible_os_family: "Windows"
+
+  # Samson version from Jenkins
+  samson_version: "{{ SAMSON_VERSION }}"
+
+  # Correct DEV Artifactory base path
+  samson_artifactory_baseurl: "https://artifactory.cib.echonet/artifactory/sam-maven-local-dev/com/bnpparibas/sam/samson"
+
+  # Folder and zip naming pattern (all lowercase, double hyphen)
+  samson_artifactory_url: "{{ samson_artifactory_baseurl }}/samson--{{ samson_version }}"
+  samson_archive_name: "samson--{{ samson_version }}"
+  samson_zip_url: "{{ samson_artifactory_url }}/{{ samson_archive_name }}.zip"
+
+  # Override role internal variable (critical!)
+  arti_url: "{{ samson_artifactory_baseurl }}"
+  samson_artifactory: "{{ samson_zip_url }}"
