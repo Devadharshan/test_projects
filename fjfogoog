@@ -1,0 +1,64 @@
+---
+- name: Deploy Samson to Windows servers
+  hosts: all
+  gather_facts: no
+
+  vars:
+    ansible_os_family: "Windows"
+
+    # Samson version coming from Jenkins
+    samson_version: "{{ SAMSON_VERSION | default('latest') }}"
+    samson_wire_env: "{{ ENVIRONMENT_TYPE | default('STG') }}"
+    samson_sublocation: "{{ host_location | default(region | default('LON')) }}"
+
+    ####################################################################
+    # ARTIFACTORY BASE URL (passed from Jenkins)
+    ####################################################################
+    samson_artifactory_baseurl: "{{ ARTIFACTORY_URL | default('https://artifactory.cib.echonet/artifactory') }}"
+
+    ####################################################################
+    # CORRECT SAMSON REPO PATH (confirmed from your logs)
+    ####################################################################
+    samson_repo_path: "sam-maven-local-release/com/bnpparibas/sam/samson"
+
+    ####################################################################
+    # FINAL SAMSON ZIP URL (FIXED for 404 issue)
+    ####################################################################
+    samson_artifactory_url: "{{ samson_artifactory_baseurl }}/{{ samson_repo_path }}/{{ samson_version }}/Samson-{{ samson_version }}.zip"
+
+    # Samson ZIP filename
+    samson_archive_name: "Samson-{{ samson_version }}"
+
+    ####################################################################
+    # JDK DOWNLOAD URL (already validated & correct)
+    ####################################################################
+    _samson_jdk_version: "jdk-11.0.27"
+    samson_jdk_artifactory_url: >
+      {{ samson_artifactory_baseurl }}/external-generic-local/oracle/java/jdk/windows/
+      {{ _samson_jdk_version }}_windows-x64_bin.zip
+
+    ####################################################################
+    # ARTIFACTORY CREDENTIALS (passed from Jenkins)
+    ####################################################################
+    artl_api_token: "{{ ARTIFACTORY_KEY | default('') }}"
+    arti_api_token: "{{ ARTIFACTORY_KEY | default('') }}"
+    artifactory_api_token: "{{ ARTIFACTORY_KEY | default('') }}"
+    artifactory_key: "{{ ARTIFACTORY_KEY | default('') }}"
+
+    ####################################################################
+    # CYBERARK CERTS PASSED FROM JENKINS (files)
+    ####################################################################
+    cyberark_cert: "{{ cyberark_cert | default('') }}"
+    cyberark_key: "{{ cyberark_key | default('') }}"
+    cyberark_ca: "{{ cyberark_ca | default('') }}"
+
+    ####################################################################
+    # SERVICE ACCOUNT FOR SAMSON (from inventory -> group_vars -> Jenkins)
+    ####################################################################
+    samson_svc_user: "{{ samson_svc_user | default(svcaccount | default('')) }}"
+    samson_service_username: "{{ samson_svc_user }}"
+    svc_user: "{{ samson_svc_user }}"
+    samson_svc_password: "{{ samson_svc_password | default('') }}"
+
+  roles:
+    - ansible-role-samson
