@@ -1,0 +1,134 @@
+import os
+import pandas as pd
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+from datetime import datetime
+
+# ---------------------------------------------------------
+# CONFIG
+# ---------------------------------------------------------
+CSV_DIR = r"C:\path\to\csvs"
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "bp_summary"
+
+# ---------------------------------------------------------
+# HELPERS
+# ---------------------------------------------------------
+def parse_date_from_filename(filename):
+    try:
+        date_part = filename.split("__")[-1].replace("_summary.csv", "")
+        return datetime.strptime(date_part, "%Y-%m-%d").date()
+    except:
+        return None
+
+
+def extract_bp_name(filename):
+    """
+    Extract BP Name from filename:
+    FocusBP_ProdLon_x64__2025-11-11_summary.csv → FocusBP
+    """
+    try:
+        return filename.split("_")[0]
+    except:
+        return "UnknownBP"
+
+
+def normalize_label(s):
+    return (
+        str(s)
+        .strip()
+        .lower()
+        .replace(" ", "_")
+        .replace("-", "_")
+    )
+
+
+# ---------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------
+def push_summary_metrics():
+
+    registry = CollectorRegistry()
+
+    # Gauges
+    g_avg_duration = Gauge(
+        "bp_summary_avg_duration",
+        "Average duration per job from summary file",
+        ["bp_name", "job_details", "file_date"],
+        registry=registry
+    )
+
+    g_total_trades = Gauge(
+        "bp_summary_total_trades",
+        "Total trades per job from summary file",
+        ["bp_name", "job_details", "file_date"],
+        registry=registry
+    )
+
+    g_job_count = Gauge(
+        "bp_summary_job_count",
+        "Job count from summary file",
+        ["bp_name", "job_details", "file_date"],
+        registry=registry
+    )
+
+    g_avg_duration_per_bp_job = Gauge(
+        "bp_summary_avg_duration_per_bp_job",
+        "Average duration per BP per JobDetails",
+        ["bp_name", "job_details", "file_date"],
+        registry=registry
+    )
+
+    # ---------------------------------------------------------
+    # PROCESS SUMMARY FILES
+    # ---------------------------------------------------------
+    for f in os.listdir(CSV_DIR):
+
+        if not f.endswith("_summary.csv"):
+            continue
+
+        file_path = os.path.join(CSV_DIR, f)
+        file_date = parse_date_from_filename(f)
+        bp_name = extract_bp_name(f)
+
+        if not file_date:
+            print("❌ Could not extract date from:", f)
+            continue
+
+        try:
+            df = pd.read_csv(file_path)
+            df.columns = [normalize_label(c) for c in df.columns]
+
+            required = ["job_details", "average_duration", "total_trades", "jobcount"]
+            if not all(col in df.columns for col in required):
+                print("❌ Missing required columns in:", f)
+                continue
+
+            df["average_duration"] = pd.to_numeric(df["average_duration"], errors="coerce").fillna(0)
+            df["total_trades"] = pd.to_numeric(df["total_trades"], errors="coerce").fillna(0)
+            df["jobcount"] = pd.to_numeric(df["jobcount"], errors="coerce").fillna(0)
+
+            for _, row in df.iterrows():
+
+                jd = str(row["job_details"])
+                avg_dur = row["average_duration"]
+                job_count = row["jobcount"]
+
+                # NEW METRIC
+                avg_duration_per_bp_job = avg_dur / job_count if job_count > 0 else 0
+
+                # PUSH VALUES
+                g_avg_duration.labels(bp_name, jd, str(file_date)).set(avg_dur)
+                g_total_trades.labels(bp_name, jd, str(file_date)).set(row["total_trades"])
+                g_job_count.labels(bp_name, jd, str(file_date)).set(job_count)
+                g_avg_duration_per_bp_job.labels(bp_name, jd, str(file_date)).set(avg_duration_per_bp_job)
+
+        except Exception as e:
+            print("❌ Error processing", f, ":", e)
+
+    # PUSH TO PROMETHEUS GATEWAY
+    push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+    print("✅ Summary metrics pushed successfully!")
+
+
+if __name__ == "__main__":
+    push_summary_metrics()
