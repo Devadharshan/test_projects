@@ -1,0 +1,36 @@
+---
+- name: Deploy Samson to Windows servers
+  hosts: all
+  gather_facts: no
+
+  vars:
+    ansible_os_family: "Windows"
+
+    samson_version: "{{ SAMSON_VERSION }}"
+    samson_wire_env: "{{ ENVIRONMENT_TYPE | default('STG') }}"
+    samson_sublocation: "{{ host_location | default(region | default('LON')) }}"
+
+    # Jenkins sends samson_artifactory_baseurl as ONLY the ROOT like:
+    # https://artifactory.cib.echonet/artifactory
+    samson_artifactory_baseurl: "{{ samson_artifactory_baseurl | default('https://artifactory.cib.echonet/artifactory') }}"
+
+    # DO NOT BUILD THE FULL URL HERE — ROLE DOES IT!
+    samson_archive_name: "Samson-{{ samson_version }}"
+
+    # JDK (role uses this correctly)
+    _samson_jdk_version: "jdk-11.0.27"
+
+    # Tokens
+    artifactory_key: "{{ ARTIFACTORY_KEY | default('') }}"
+
+    # Jenkins injected cert files
+    cyberark_cert: "{{ cyberark_cert | default('') }}"
+    cyberark_key: "{{ cyberark_key | default('') }}"
+    cyberark_ca: "{{ cyberark_ca | default('') }}"
+
+    # Service account
+    samson_svc_user: "{{ svcaccount | default('') }}"
+    samson_svc_password: "{{ samson_svc_password | default('') }}"
+
+  roles:
+    - ansible-role-samson
