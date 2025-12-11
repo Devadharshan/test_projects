@@ -1,0 +1,234 @@
+def cyberarkCAFile = "CA_Bundle.pem"   // Jenkins credential ID for CyberArk CA bundle
+
+Map certificateMap = [
+    EMEA: [
+        PRD: [ IV2: 'IV2AFOCUS-OPSP', IV1: 'AIM-IV1FOCUS-OPSP-EMEA-Cyberark' ],
+        STG: [ IV2: 'IV2AFOCUS-OPSP', IV1: 'AIM-IV1FOCUS-OPSP-EMEA-Cyberark' ],
+        DEV: [ IV2: 'IV2AFOCUS-OPSD', IV1: 'AIM-FOCUS-OPSD-Cyberark' ]
+    ],
+
+    AMER: [
+        PRD: [ IV2: 'IV2RFOCUS-OPSP', IV1: 'AIM-FOCUS-NAR-OPSP-Cyberark' ],
+        STG: [ IV2: 'IV2RFOCUS-OPSP', IV1: 'AIM-FOCUS-NAR-OPSP-Cyberark' ],
+        DEV: [ IV2: 'IV2RFOCUS-OPSD', IV1: 'AIM-FOCUS-NAR-OPSD' ]
+    ],
+
+    APAC: [
+        PRD: [ IV2: 'IV2CFOCUS-OPSP', IV1: 'AIM-FOCUS-APAC-OPSP-Cyberark' ],
+        STG: [ IV2: 'IV2CFOCUS-OPSP', IV1: 'AIM-FOCUS-APAC-OPSP-Cyberark' ],
+        DEV: [ IV2: 'IV2CFOCUS-OPSD', IV1: 'AIM-FOCUS-APAC-OPSD' ]
+    ]
+]
+
+pipeline {
+    agent {
+        label params.REGION == "EMEA" ? 'bnpp-deploytools' :
+              params.REGION == "APAC" ? 'bnpp-deploytools-apac' :
+              params.REGION == "AMER" ? 'bnpp-deploytools-amer' :
+              params.REGION
+    }
+
+    parameters {
+        choice(name: 'REGION', choices: ['EMEA','AMER','APAC'], description: 'Region')
+        choice(name: 'ENVIRONMENT_TYPE', choices: ['STG','PRD','DEV'], description: 'Environment Type')
+        string(name: 'SAMSON_VERSION', defaultValue: 'latest', description: 'Samson Version to deploy')
+        text(name: 'HOST_VALUES', description: 'Host(s) to deploy Samson (newline or single host)')
+    }
+
+    environment {
+        SHARED_BITBUCKET_SSH_KEY = "BITBUCKET_public_access_auth_usr"
+    }
+
+    stages {
+
+        stage('Select Certificates') {
+            steps {
+                script {
+                    def certBase = certificateMap[ params.REGION ][ params.ENVIRONMENT_TYPE ]['IV2']
+                    env.cyberarkCertFile = certBase + ".crt"
+                    env.cyberarkKeyFile  = certBase + ".key"
+                    echo "Selected certificate/key: ${certBase}"
+                }
+            }
+        }
+
+        stage('Select Artifactory Token') {
+            steps {
+                script {
+                    if(params.REGION == 'AMER') {
+                        withCredentials([string(credentialsId: "Artifactory_AMER_Key", variable: 'ArtToken')]) {
+                            env.Artifactory_Key = ArtToken
+                        }
+                        env.Base_Artifactory_URL = "https://artifactory-amer.cib.echonet"
+                    } else if(params.REGION == 'APAC') {
+                        withCredentials([string(credentialsId: "Artifactory_APAC_Key", variable: 'ArtToken')]) {
+                            env.Artifactory_Key = ArtToken
+                        }
+                        env.Base_Artifactory_URL = "https://artifactory-apac.cib.echonet"
+                    } else {
+                        withCredentials([string(credentialsId: "Artifactory_Key", variable: 'ArtToken')]) {
+                            env.Artifactory_Key = ArtToken
+                        }
+                        env.Base_Artifactory_URL = "https://artifactory.cib.echonet"
+                    }
+
+                    echo "Artifactory URL selected: ${env.Base_Artifactory_URL}"
+                }
+            }
+        }
+
+        stage('Declare Hosts') {
+            steps {
+                script {
+                    if (!params.HOST_VALUES?.trim()) {
+                        error "HOST_VALUES cannot be empty!"
+                    }
+
+                    def hostGroup = "IV2-${ENVIRONMENT_TYPE}-WIN-${REGION}"
+                    def inventoryFile = "ansible/inventories/hosts.ini"
+
+                    sh """
+                        mkdir -p ansible/inventories/group_vars
+                        echo "[${hostGroup}]" > ${inventoryFile}
+                        echo "${HOST_VALUES}" >> ${inventoryFile}
+
+                        echo ""
+                        echo "===== INVENTORY WRITTEN ====="
+                        echo "Group: ${hostGroup}"
+                        echo "Host(s): ${HOST_VALUES}"
+                        echo "=============================="
+                        echo ""
+                        cat ${inventoryFile}
+                    """
+
+                    currentBuild.displayName = "${ENVIRONMENT_TYPE}-${SAMSON_VERSION}-${BUILD_NUMBER}"
+                }
+            }
+        }
+
+        stage('Run Ansible') {
+            steps {
+                script {
+                    withCredentials([
+                        file(credentialsId: "${cyberarkCertFile}", variable: 'cyberarkCert'),
+                        file(credentialsId: "${cyberarkKeyFile}",  variable: 'cyberarkKey'),
+                        file(credentialsId: "${cyberarkCAFile}",   variable: 'cyberarkCA'),
+                        usernamePassword(credentialsId: 'focus-service-user',
+                                         usernameVariable: 'SVC_USER',
+                                         passwordVariable: 'SVC_PASS')
+                    ]) {
+
+                        sh """
+                            cd ansible
+                            ansible-playbook \
+                              -i inventories/hosts.ini \
+                              playbooks/deploy_samson.yml \
+                              -e REGION="${REGION}" \
+                              -e ENVIRONMENT_TYPE="${ENVIRONMENT_TYPE}" \
+                              -e SAMSON_VERSION="${SAMSON_VERSION}" \
+                              -e ARTIFACTORY_KEY="${Artifactory_Key}" \
+                              -e ARTIFACTORY_URL="${Base_Artifactory_URL}" \
+                              -e arti_api_token="${Artifactory_Key}" \
+                              -e artl_api_token="${Artifactory_Key}" \
+                              -e artifactory_api_token="${Artifactory_Key}" \
+                              -e artifactory_key="${Artifactory_Key}" \
+                              -e cyberark_cert="${cyberarkCert}" \
+                              -e cyberark_key="${cyberarkKey}" \
+                              -e cyberark_ca="${cyberarkCA}" \
+                              -e samson_service_username="${SVC_USER}" \
+                              -e samson_svc_user="${SVC_USER}" \
+                              -e svc_user="${SVC_USER}" \
+                              -e samson_svc_password="${SVC_PASS}"
+                        """
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+
+
+[defaults]
+inventory = inventories/hosts.ini
+roles_path = roles
+host_key_checking = False
+retry_files_enabled = False
+forks = 20
+
+
+
+---
+# PSRP settings
+ansible_connection: psrp
+ansible_port: 5986
+ansible_psrp_cert_validation: ignore
+ansible_psrp_connection_timeout: 300
+ansible_psrp_operation_timeout: 300
+ansible_psrp_read_timeout: 300
+
+# target machine credentials via CyberArk (certificate-based lookup)
+ansible_user: '{{ lookup("cyberark","safe={{ safe }}:appid={{ appid }}:credential={{ ops_credential }}:region={{ region }}:field=username:ca={{ cyberark_ca }}:cert={{ cyberark_cert }}:key={{ cyberark_key }}") }}'
+ansible_password: '{{ lookup("cyberark","safe={{ safe }}:appid={{ appid }}:credential={{ ops_credential }}:region={{ region }}:field=password:ca={{ cyberark_ca }}:cert={{ cyberark_cert }}:key={{ cyberark_key }}") }}'
+
+# Service account lookup (preferred) - will be overridden by Jenkins if supplied
+samson_svc_user: >-
+  {{ lookup("cyberark","safe={{ safe }}:appid={{ appid }}:credential={{ svc_credential }}:region={{ region }}:field=username:ca={{ cyberark_ca }}:cert={{ cyberark_cert }}:key={{ cyberark_key }}") | default(svcaccount) }}
+
+samson_svc_password: >-
+  {{ lookup("cyberark","safe={{ safe }}:appid={{ appid }}:credential={{ svc_credential }}:region={{ region }}:field=password:ca={{ cyberark_ca }}:cert={{ cyberark_cert }}:key={{ cyberark_key }}") | default('') }}
+
+# Backwards-compatible aliasing (role uses inconsistent names)
+samson_service_username: "{{ samson_svc_user | default(samson_service_username | default(svcaccount | default('')) ) }}"
+svc_user: "{{ samson_service_username }}"
+
+
+---
+- name: Deploy Samson to Windows servers
+  hosts: all
+  gather_facts: no
+
+  vars:
+    ansible_os_family: "Windows"
+
+    # Jenkins-provided values (via extra-vars)
+    samson_version: "{{ SAMSON_VERSION | default('latest') }}"
+
+    # Artifactory
+    samson_artifactory_baseurl: "{{ ARTIFACTORY_URL | default('https://artifactory.cib.echonet') }}"
+    samson_artifactory_url: "{{ samson_artifactory_baseurl }}/samson/{{ samson_version }}"
+    samson_archive_name: "samson-{{ samson_version }}"
+
+    # Artifactory token aliases
+    artl_api_token: "{{ ARTIFACTORY_KEY | default(artl_api_token | default('')) }}"
+    arti_api_token:  "{{ ARTIFACTORY_KEY | default(arti_api_token | default(artl_api_token | default(''))) }}"
+    artifactory_api_token: "{{ ARTIFACTORY_KEY | default(artifactory_api_token | default(arti_api_token | default(''))) }}"
+    artifactory_key: "{{ ARTIFACTORY_KEY | default(artifactory_key | default('')) }}"
+
+    # CyberArk certs passed from Jenkins (files)
+    cyberark_cert: "{{ cyberark_cert | default('') }}"
+    cyberark_key: "{{ cyberark_key | default('') }}"
+    cyberark_ca: "{{ cyberark_ca | default('') }}"
+
+    # Service account variables (Jenkins extra-vars override these)
+    # Accept whichever legacy name the role uses:
+    samson_svc_user: "{{ samson_svc_user | default(samson_service_username | default(svc_user | default(svcaccount | default('')))) }}"
+    samson_service_username: "{{ samson_svc_user }}"
+    svc_user: "{{ samson_svc_user }}"
+    samson_svc_password: "{{ samson_svc_password | default('') }}"
+
+  pre_tasks:
+    - name: Debug: show resolved important vars (temporary — remove after verify)
+      debug:
+        msg:
+          - "samson_version={{ samson_version }}"
+          - "samson_artifactory_baseurl={{ samson_artifactory_baseurl }}"
+          - "samson_archive_name={{ samson_archive_name }}"
+          - "samson_svc_user={{ samson_svc_user | default('UNSET') }}"
+          - "samson_svc_password_set={{ (samson_svc_password is defined and samson_svc_password != '') | ternary('YES','NO') }}"
+
+  roles:
+    - ansible-role-samson
+
+
