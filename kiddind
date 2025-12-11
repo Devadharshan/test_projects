@@ -1,0 +1,62 @@
+---
+- name: Deploy Samson to Windows servers
+  hosts: all
+  gather_facts: no
+
+  vars:
+    ansible_os_family: "Windows"
+
+    samson_version: "{{ SAMSON_VERSION }}"
+    samson_wire_env: "{{ ENVIRONMENT_TYPE | default('STG') }}"
+    samson_sublocation: "{{ host_location | default(region | default('LON')) }}"
+
+    # -----------------------------
+    # FIXED: Correct base Artifactory URL
+    # -----------------------------
+    samson_artifactory_baseurl: "https://artifactory.cib.echonet/artifactory"
+
+    # -----------------------------
+    # FIXED: Correct Samson directory structure
+    # -----------------------------
+    samson_artifactory_url: >
+      {{ samson_artifactory_baseurl }}/sam-maven-local-dev/com/bnpparibas/sam/samson/{{ samson_version }}
+
+    samson_archive_name: "samson-{{ samson_version }}"
+    samson_zip_url: "{{ samson_artifactory_url }}/{{ samson_archive_name }}.zip"
+
+    # Backward compatibility alias
+    arti_url: "{{ samson_artifactory_url }}"
+    samson_artifactory: "{{ samson_zip_url }}"
+
+    # -----------------------------
+    # JDK URL (unchanged)
+    # -----------------------------
+    _samson_jdk_version: "jdk-11.0.27"
+    samson_jdk_artifactory_url: >
+      {{ samson_artifactory_baseurl }}/external-generic-local/oracle/java/jdk/windows/{{ _samson_jdk_version }}_windows-x64_bin.zip
+
+    # -----------------------------
+    # Artifactory Tokens
+    # -----------------------------
+    art1_api_token: "{{ ARTIFACTORY_KEY | default('') }}"
+    art2_api_token: "{{ ARTIFACTORY_KEY | default('') }}"
+    artifactory_api_token: "{{ ARTIFACTORY_KEY | default('') }}"
+    artifactory_key: "{{ ARTIFACTORY_KEY | default('') }}"
+
+    # -----------------------------
+    # CyberArk (unchanged)
+    # -----------------------------
+    cyberark_cert: "{{ cyberark_cert | default('') }}"
+    cyberark_key: "{{ cyberark_key | default('') }}"
+    cyberark_ca: "{{ cyberark_ca | default('') }}"
+
+    # -----------------------------
+    # Service Account (unchanged)
+    # -----------------------------
+    samson_svc_user: "{{ samson_svc_user | default(samson_service_username | default(svcaccount | default(''))) }}"
+    samson_service_username: "{{ samson_svc_user }}"
+    svc_user: "{{ samson_svc_user }}"
+    samson_svc_password: "{{ samson_svc_password | default('') }}"
+
+  roles:
+    - ansible-role-samson
