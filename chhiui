@@ -1,0 +1,116 @@
+import os
+import pandas as pd
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+from datetime import datetime
+
+# ---------------------------------------------------------
+# CONFIG
+# ---------------------------------------------------------
+CSV_DIR = r"C:\path\to\csvs"
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "bp_summary"
+
+
+# Extract date from filename (format: something__2025-11-11_summary.csv)
+def parse_date_from_filename(filename):
+    try:
+        date_part = filename.split("__")[-1].replace("_summary.csv", "")
+        return datetime.strptime(date_part, "%Y-%m-%d").date()
+    except:
+        return None
+
+
+# Normalize header names
+def normalize_label(s):
+    return (
+        str(s)
+        .strip()
+        .lower()
+        .replace(" ", "_")
+        .replace("-", "_")
+    )
+
+
+# ---------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------
+def push_summary_metrics():
+
+    registry = CollectorRegistry()
+
+    # Gauge creation (static fields)
+    g_avg_duration = Gauge(
+        "bp_summary_avg_duration",
+        "Average duration per job from summary file",
+        ["job_details", "file_date"],
+        registry=registry
+    )
+
+    g_total_trades = Gauge(
+        "bp_summary_total_trades",
+        "Total trades per job from summary file",
+        ["job_details", "file_date"],
+        registry=registry
+    )
+
+    g_job_count = Gauge(
+        "bp_summary_job_count",
+        "Job count from summary file",
+        ["job_details", "file_date"],
+        registry=registry
+    )
+
+    # -----------------------------------------------------
+    # READ ALL SUMMARY FILES
+    # -----------------------------------------------------
+    for f in os.listdir(CSV_DIR):
+
+        if not f.endswith("_summary.csv"):
+            continue
+
+        file_path = os.path.join(CSV_DIR, f)
+        file_date = parse_date_from_filename(f)
+
+        if not file_date:
+            print("❌ Could not extract date from:", f)
+            continue
+
+        try:
+            df = pd.read_csv(file_path)
+
+            # Normalize column headers
+            df.columns = [normalize_label(c) for c in df.columns]
+
+            # Required columns
+            required = ["job_details", "average_duration", "total_trades", "jobcount"]
+            if not all(col in df.columns for col in required):
+                print("❌ Missing required columns in:", f)
+                continue
+
+            # Convert numeric columns
+            df["average_duration"] = pd.to_numeric(df["average_duration"], errors="coerce").fillna(0)
+            df["total_trades"] = pd.to_numeric(df["total_trades"], errors="coerce").fillna(0)
+            df["jobcount"] = pd.to_numeric(df["jobcount"], errors="coerce").fillna(0)
+
+            # -----------------------------------------------------
+            # PUSH EACH ROW AS METRIC
+            # -----------------------------------------------------
+            for _, row in df.iterrows():
+
+                jd = str(row["job_details"])
+
+                g_avg_duration.labels(jd, str(file_date)).set(row["average_duration"])
+                g_total_trades.labels(jd, str(file_date)).set(row["total_trades"])
+                g_job_count.labels(jd, str(file_date)).set(row["jobcount"])
+
+        except Exception as e:
+            print("❌ Error processing", f, ":", e)
+
+    # PUSH TO GATEWAY
+    push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+
+    print("✅ Summary metrics pushed successfully!")
+
+
+if __name__ == "__main__":
+    push_summary_metrics()
