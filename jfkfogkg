@@ -1,0 +1,58 @@
+stage('Run Ansible') {
+    steps {
+        script {
+
+            withCredentials([
+                file(credentialsId: "${cyberarkCertFile}", variable: 'cyberarkCert'),
+                file(credentialsId: "${cyberarkKeyFile}",  variable: 'cyberarkKey'),
+                file(credentialsId: "${cyberarkCAFile}",   variable: 'cyberarkCA'),
+                usernamePassword(credentialsId: 'focus-service-user',
+                                 usernameVariable: 'RAW_USER',
+                                 passwordVariable: 'RAW_PASS')
+            ]) {
+
+                // Determine which group_vars file to read based on region & env
+                def GROUP_FILE = "ansible/group_vars/${REGION}-${ENVIRONMENT_TYPE}-WIN-EMEA.yml"
+
+                // Extract domain & svcaccount from the group_vars YAML
+                def domain = sh(
+                    script: "grep '^domain:' ${GROUP_FILE} | awk '{print \$2}'",
+                    returnStdout: true
+                ).trim()
+
+                def svcaccount = sh(
+                    script: "grep '^svcaccount:' ${GROUP_FILE} | awk '{print \$2}'",
+                    returnStdout: true
+                ).trim()
+
+                // Build final service user in required format: domain\user
+                def SAMSON_USER = "${domain}\\\\${svcaccount}"
+
+                echo "★ Domain detected from group_vars: ${domain}"
+                echo "★ Svc account detected: ${svcaccount}"
+                echo "★ Final service account passed to Ansible: ${SAMSON_USER}"
+
+                sh """
+                    cd ansible
+                    ansible-playbook \
+                        -i inventories/hosts.ini \
+                        playbooks/deploy_samson.yml \
+                        -e REGION="${REGION}" \
+                        -e ENVIRONMENT_TYPE="${ENVIRONMENT_TYPE}" \
+                        -e samson_release_type="RELEASE" \
+                        -e samson_artifactory_baseurl="https://artifactory.cib.echonet/artifactory" \
+                        -e samson_version="${SAMSON_VERSION}" \
+                        -e samson_svc_user='${SAMSON_USER}' \
+                        -e samson_svc_password='${RAW_PASS}' \
+                        -e ARTIFACTORY_KEY="${Artifactory_Key}" \
+                        -e ARTIFACTORY_URL="${Base_Artifactory_URL}" \
+                        -e art1_api_token="${Artifactory_Key}" \
+                        -e artfactory_api_token="${Artifactory_Key}" \
+                        -e cyberark_cert="${cyberarkCert}" \
+                        -e cyberark_key="${cyberarkKey}" \
+                        -e cyberark_ca="${cyberarkCA}"
+                """
+            }
+        }
+    }
+}
