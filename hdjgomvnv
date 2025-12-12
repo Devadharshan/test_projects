@@ -1,0 +1,44 @@
+---
+- name: Deploy Samson to Windows servers
+  hosts: all
+  gather_facts: yes
+
+  vars:
+    ansible_os_family: "Windows"
+
+    # Version from Jenkins
+    samson_version: "{{ SAMSON_VERSION }}"
+
+    # Env settings
+    samson_wire_env: "{{ ENVIRONMENT_TYPE | default('STG') }}"
+    samson_sublocation: "{{ host_location | default(region | default('LON')) }}"
+
+    # Artifactory base URL
+    samson_artifactory_baseurl: "{{ samson_artifactory_baseurl | default('https://artifactory.cib.echonet/artifactory') }}"
+
+    # Archive name used by role
+    samson_archive_name: "Samson-{{ samson_version }}"
+
+    # JDK version (role uses it)
+    _samson_jdk_version: "jdk-11.0.27"
+
+    # Tokens
+    artifactory_key: "{{ ARTIFACTORY_KEY | default('') }}"
+
+    # Certs passed from Jenkins
+    cyberark_cert: "{{ cyberark_cert | default('') }}"
+    cyberark_key: "{{ cyberark_key | default('') }}"
+    cyberark_ca: "{{ cyberark_ca | default('') }}"
+
+    # Service account (MUST be passed from Jenkins)
+    samson_svc_user: "{{ samson_svc_user }}"
+    samson_svc_password: "{{ samson_svc_password }}"
+
+  roles:
+    - ansible-role-samson
+
+
+
+
+
+
