@@ -1,0 +1,30 @@
+---
+- name: Deploy Samson to Windows servers
+  hosts: all
+  gather_facts: yes
+
+  pre_tasks:
+    - name: Override CyberArk certificate variables from Jenkins
+      set_fact:
+        cyberark_ca: "{{ _cyberark_ca }}"
+        cyberark_cert: "{{ _cyberark_cert }}"
+        cyberark_key: "{{ _cyberark_key }}"
+
+    - name: Override service account variables
+      set_fact:
+        samson_svc_user: "{{ samson_domain }}\\{{ svcaccount }}"
+        samson_svc_password: "{{ samson_svc_password }}"
+
+  vars:
+    ansible_os_family: "Windows"
+
+    samson_version: "{{ SAMSON_VERSION }}"
+    samson_wire_env: "{{ ENVIRONMENT_TYPE }}"
+    samson_artifactory_baseurl: "https://artifactory.cib.echonet/artifactory"
+    samson_archive_name: "Samson-{{ samson_version }}"
+
+    samson_domain: "{{ domain }}"
+    svcaccount: "{{ svcaccount }}"
+
+  roles:
+    - ansible-role-samson
