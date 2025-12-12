@@ -1,0 +1,35 @@
+---
+name: Deploy Samson to Windows servers
+hosts: all
+gather_facts: yes
+
+vars:
+  ansible_os_family: "Windows"
+
+  samson_version: "{{ SAMSON_VERSION }}"
+  samson_wire_env: "{{ ENVIRONMENT_TYPE | default('STG') }}"
+  samson_sublocation: "{{ host_location | default(region | default('LON')) }}"
+
+  samson_artifactory_baseurl: "{{ samson_artifactory_baseurl | default('https://artifactory.cib.echonet/artifactory') }}"
+  samson_archive_name: "Samson-{{ samson_version }}"
+
+  _samson_jdk_version: "jdk-11.0.27"
+
+  artifactory_key: "{{ ARTIFACTORY_KEY | default('') }}"
+
+  cyberark_cert: "{{ cyberark_cert | default('') }}"
+  cyberark_key: "{{ cyberark_key | default('') }}"
+  cyberark_ca: "{{ cyberark_ca | default('') }}"
+
+  samson_domain: "{{ domain }}"
+  samson_svc_user: "{{ samson_domain }}\\{{ svcaccount }}"
+  samson_svc_password: "{{ samson_svc_password | default('') }}"
+
+tasks:
+  - name: Override service user & password BEFORE role runs
+    set_fact:
+      samson_svc_user: "{{ samson_svc_user }}"
+      samson_svc_password: "{{ samson_svc_password }}"
+
+roles:
+  - ansible-role-samson
