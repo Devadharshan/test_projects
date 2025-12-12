@@ -1,0 +1,33 @@
+---
+- name: Deploy Samson to Windows servers
+  hosts: all
+  gather_facts: no
+
+  vars:
+    ansible_os_family: "Windows"
+
+    samson_version: "{{ SAMSON_VERSION | default('latest') }}"
+
+    # Domain + service account pulled from inventory group_vars
+    samson_domain: "{{ domain }}"
+    samson_svc_user: "{{ samson_domain }}\\{{ svcaccount }}"
+
+    # CyberArk password lookup
+    samson_svc_password: >-
+      {{ lookup('cyberark',
+        'safe=' ~ safe ~
+        ':appid=' ~ appid ~
+        ':credential=' ~ svc_credential ~
+        ':region=' ~ region ~
+        ':field=password' ~
+        ':ca=' ~ cyberark_ca ~
+        ':cert=' ~ cyberark_cert ~
+        ':key=' ~ cyberark_key
+      ) }}
+
+    # Artifactory
+    samson_artifactory_baseurl: "https://artifactory.cib.echonet/artifactory"
+    samson_archive_name: "Samson-{{ samson_version }}"
+
+  roles:
+    - ansible-role-samson
