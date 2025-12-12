@@ -1,0 +1,51 @@
+stage('Run Ansible') {
+    steps {
+        script {
+            withCredentials([
+                file(credentialsId: "${cyberarkCertFile}", variable: 'cyberarkCert'),
+                file(credentialsId: "${cyberarkKeyFile}",  variable: 'cyberarkKey'),
+                file(credentialsId: "${cyberarkCAFile}",   variable: 'cyberarkCA'),
+                usernamePassword(credentialsId: 'focus-service-user',
+                    usernameVariable: 'SVC_USER',
+                    passwordVariable: 'SVC_PASS')
+            ]) {
+
+                // FIXED: group file is always IV2
+                def GROUP_FILE = "ansible/group_vars/IV2-${ENVIRONMENT_TYPE}-WIN-EMEA.yml"
+
+                def domain = sh(
+                    script: "grep '^domain:' ${GROUP_FILE} | awk '{print \$2}'",
+                    returnStdout: true
+                ).trim()
+
+                def svcaccount = sh(
+                    script: "grep '^svcaccount:' ${GROUP_FILE} | awk '{print \$2}'",
+                    returnStdout: true
+                ).trim()
+
+                def SAMSON_USER = "${domain}\\\\${svcaccount}"
+
+                echo "Using DOMAIN: ${domain}"
+                echo "Using SERVICE ACCOUNT: ${SAMSON_USER}"
+
+                sh """
+                    cd ansible
+                    ansible-playbook \
+                        -i inventories/hosts.ini \
+                        playbooks/deploy_samson.yml \
+                        -e SAMSON_VERSION="${SAMSON_VERSION}" \
+                        -e ENVIRONMENT_TYPE="${ENVIRONMENT_TYPE}" \
+                        -e samson_svc_user="${SAMSON_USER}" \
+                        -e samson_svc_password="${SVC_PASS}" \
+                        -e samson_artifactory_baseurl="https://artifactory.cib.echonet/artifactory" \
+                        -e ARTIFACTORY_KEY="${artifactory_Key}" \
+                        -e Base_Artifactory_URL="${Base_Artifactory_URL}" \
+                        -e artifactory_api_token="${artifactory_Key}" \
+                        -e cyberark_cert="${cyberarkCert}" \
+                        -e cyberark_key="${cyberarkKey}" \
+                        -e cyberark_ca="${cyberarkCA}"
+                """
+            }
+        }
+    }
+}
