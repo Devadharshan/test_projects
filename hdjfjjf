@@ -1,0 +1,42 @@
+---
+- name: Deploy Samson to Windows servers
+  hosts: all
+  gather_facts: yes
+
+  vars:
+    ansible_os_family: "Windows"
+
+    # Version + ENV values from Jenkins
+    samson_version: "{{ SAMSON_VERSION }}"
+    samson_wire_env: "{{ ENVIRONMENT_TYPE | default('STG') }}"
+    samson_sublocation: "{{ host_location | default('LON') }}"
+
+    # Artifactory
+    samson_artifactory_baseurl: "{{ samson_artifactory_baseurl | default('https://artifactory.cib.echonet/artifactory') }}"
+    samson_archive_name: "samson-{{ samson_version }}"
+
+    # JDK used by the role
+    _samson_jdk_version: "jdk-11.0.27"
+
+    # Tokens (from Jenkins)
+    artifactory_key: "{{ ARTIFACTORY_KEY | default('') }}"
+
+    # CyberArk certificates (coming from Jenkins)
+    cyberark_cert: "{{ cyberark_cert }}"
+    cyberark_key: "{{ cyberark_key }}"
+    cyberark_ca: "{{ cyberark_ca }}"
+
+    # Service account provided by Jenkins
+    domain: "{{ domain }}"
+    svaccount: "{{ svaccount }}"
+    samson_svc_user: "{{ domain }}\\{{ svaccount }}"
+    samson_svc_password: "{{ samson_svc_password }}"
+
+  tasks:
+    - name: Override service user and password before role
+      set_fact:
+        samson_svc_user: "{{ samson_svc_user }}"
+        samson_svc_password: "{{ samson_svc_password }}"
+
+  roles:
+    - ansible-role-samson
