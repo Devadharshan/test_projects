@@ -1,0 +1,18 @@
+# ===============================
+# Service account (Samson)
+# ===============================
+
+samson_svc_user: "euro\\SVC2AWIPWUFOCUSS"
+
+samson_svc_password: >-
+  {{ lookup(
+      "cyberark",
+      "safe=IV2AFOCUS-LOGIN
+       appid={{ appid }}
+       credential=EMEA_WINDOWS_AD-SvcAccount-SVC2AWIPWUFOCUSS-euro.net.intra
+       region={{ region }}
+       field=password
+       ca={{ cyberark_ca }}
+       cert={{ cyberark_cert }}
+       key={{ cyberark_key }}"
+  ) }}
