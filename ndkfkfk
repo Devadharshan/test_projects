@@ -1,0 +1,36 @@
+---
+- name: Deploy Samson to Windows servers
+  hosts: all
+  gather_facts: yes
+
+  vars:
+    ansible_os_family: "Windows"
+
+    # Version / Env from Jenkins
+    samson_version: "{{ SAMSON_VERSION }}"
+    samson_wire_env: "{{ ENVIRONMENT_TYPE | default('STG') }}"
+    samson_sublocation: "{{ host_location | default('LON') }}"
+
+    # Artifactory
+    samson_artifactory_baseurl: "{{ samson_artifactory_baseurl | default('https://artifactory.cib.echonet/artifactory') }}"
+    samson_archive_name: "samson-{{ samson_version }}"
+
+    # JDK
+    _samson_jdk_version: "jdk-11.0.27"
+
+    # Artifactory token
+    artifactory_key: "{{ ARTIFACTORY_KEY | default('') }}"
+
+    # CyberArk certs (from Jenkins)
+    cyberark_cert: "{{ cyberark_cert }}"
+    cyberark_key: "{{ cyberark_key }}"
+    cyberark_ca: "{{ cyberark_ca }}"
+
+  tasks:
+    # 🔑 THIS IS THE CRITICAL FIX
+    - name: Map ops_credential to svc_credential for role compatibility
+      set_fact:
+        svc_credential: "{{ ops_credential }}"
+
+  roles:
+    - ansible-role-samson
