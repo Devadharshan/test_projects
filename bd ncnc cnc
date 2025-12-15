@@ -1,0 +1,75 @@
+---
+# PSRP connection
+ansible_connection: psrp
+ansible_port: 5986
+ansible_psrp_cert_validation: ignore
+
+# CyberArk base
+safe: IV2AFOCUS-LOGIN
+appid: App-OPS_IV2AFOCUS_PRD
+region: EMEA
+
+# OPS credential (ONLY for ansible login if needed)
+ops_credential: EMEA_WINDOWS_AD-OpsAccount-OPS2AWIFOCUSS-euro.net.intra
+
+# Service account (USED BY SAMSON SERVICE)
+svc_credential: EMEA_WINDOWS_AD-SvcAccount-SVC2AWIPWUFOCUSS-euro.net.intra
+
+# Certificates from Jenkins
+cyberark_ca: "{{ cyberark_ca }}"
+cyberark_cert: "{{ cyberark_cert }}"
+cyberark_key: "{{ cyberark_key }}"
+
+# Host login (OPS)
+ansible_user: >-
+  {{ lookup(
+    'cyberark',
+    'safe=' ~ safe
+    ~ ':appid=' ~ appid
+    ~ ':credential=' ~ ops_credential
+    ~ ':region=' ~ region
+    ~ ':field=username'
+    ~ ':ca=' ~ cyberark_ca
+    ~ ':cert=' ~ cyberark_cert
+    ~ ':key=' ~ cyberark_key
+  ) }}
+
+ansible_password: >-
+  {{ lookup(
+    'cyberark',
+    'safe=' ~ safe
+    ~ ':appid=' ~ appid
+    ~ ':credential=' ~ ops_credential
+    ~ ':region=' ~ region
+    ~ ':field=password'
+    ~ ':ca=' ~ cyberark_ca
+    ~ ':cert=' ~ cyberark_cert
+    ~ ':key=' ~ cyberark_key
+  ) }}
+
+# Samson Windows Service credentials (SERVICE ACCOUNT)
+samson_svc_user: >-
+  {{ lookup(
+    'cyberark',
+    'safe=' ~ safe
+    ~ ':appid=' ~ appid
+    ~ ':credential=' ~ svc_credential
+    ~ ':region=' ~ region
+    ~ ':field=username'
+    ~ ':ca=' ~ cyberark_ca
+    ~ ':cert=' ~ cyberark_cert
+    ~ ':key=' ~ cyberark_key
+  ) }}
+
+samson_svc_password: >-
+  {{ lookup(
+    'cyberark',
+    'safe=' ~ safe
+    ~ ':appid=' ~ appid
+    ~ ':credential=' ~ svc_credential
+    ~ ':region=' ~ region
+    ~ ':field=password'
+    ~ ':ca=' ~ cyberark_ca
+    ~ ':cert=' ~ cyberark_cert
+    ~ ':key=' ~ cyberark_key
+  ) }}
