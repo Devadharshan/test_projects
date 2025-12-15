@@ -1,0 +1,30 @@
+samson_svc_user: >-
+  {{ domain }}\{{ lookup(
+    'cyberark',
+    'safe=IV2AFOCUS-LOGIN'
+    ~ ':appid=' ~ appid
+    ~ ':credential=' ~ svc_credential
+    ~ ':region=' ~ region
+    ~ ':field=username'
+    ~ ':ca=' ~ cyberark_ca
+    ~ ':cert=' ~ cyberark_cert
+    ~ ':key=' ~ cyberark_key
+  ) }}
+
+samson_svc_password: >-
+  {{ lookup(
+    'cyberark',
+    'safe=IV2AFOCUS-LOGIN'
+    ~ ':appid=' ~ appid
+    ~ ':credential=' ~ svc_credential
+    ~ ':region=' ~ region
+    ~ ':field=password'
+    ~ ':ca=' ~ cyberark_ca
+    ~ ':cert=' ~ cyberark_cert
+    ~ ':key=' ~ cyberark_key
+  ) }}
+
+# Backward compatibility (role uses these names)
+samson_service_username: "{{ samson_svc_user }}"
+samson_service_password: "{{ samson_svc_password }}"
+svc_user: "{{ samson_svc_user }}"
