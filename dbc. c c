@@ -1,0 +1,114 @@
+=================================
+Objective
+=================================
+Run Grafana as a Windows Service so that it:
+- Starts automatically on system boot
+- Runs in the background
+- Can be managed via services.msc
+
+=================================
+Prerequisites
+=================================
+- Grafana installed on Windows
+- Installation path:
+  C:\Program Files\Grafana
+- Executable:
+  C:\Program Files\Grafana\bin\grafana-server.exe
+- Administrator access
+
+=================================
+Step 1: Verify Grafana Manually
+=================================
+Open PowerShell as Administrator and run:
+
+"C:\Program Files\Grafana\bin\grafana-server.exe" ^
+ --homepath "C:\Program Files\Grafana" ^
+ --config "C:\Program Files\Grafana\conf\default.ini" ^
+ --packaging=windows
+
+Expected log:
+HTTP Server Listen on port 3000
+
+Open browser:
+http://localhost:3000
+
+=================================
+Step 2: Remove Existing Service (If Any)
+=================================
+Run:
+
+sc.exe delete Grafana
+
+=================================
+Step 3: Create Grafana Service
+=================================
+Run in PowerShell (Admin):
+
+New-Service -Name "Grafana" ^
+ -BinaryPathName '"C:\Program Files\Grafana\bin\grafana-server.exe" --homepath "C:\Program Files\Grafana" --config "C:\Program Files\Grafana\conf\default.ini" --packaging=windows' ^
+ -DisplayName "Grafana Server" ^
+ -Description "Grafana Monitoring Service" ^
+ -StartupType Automatic
+
+=================================
+Step 4: Fix Permissions
+=================================
+Run:
+
+icacls "C:\Program Files\Grafana" /grant "NT AUTHORITY\SYSTEM:(OI)(CI)(F)" /T
+
+=================================
+Step 5: Start Service
+=================================
+Run:
+
+Start-Service Grafana
+
+Check status:
+
+Get-Service Grafana
+
+=================================
+Step 6: Verify from Services
+=================================
+- Press Win + R
+- Type services.msc
+- Check "Grafana Server"
+- Status should be Running
+- Startup type should be Automatic
+
+=================================
+Step 7: Access Grafana
+=================================
+URL:
+http://localhost:3000
+
+Default Login:
+admin / admin
+
+=================================
+Troubleshooting
+=================================
+Error 1053:
+- Ensure --packaging=windows is present
+- Verify homepath and config path
+- Check permissions
+
+Check logs:
+Get-EventLog -LogName Application -Newest 20
+
+=================================
+Service Commands
+=================================
+Start:
+Start-Service Grafana
+
+Stop:
+Stop-Service Grafana
+
+Delete:
+sc.exe delete Grafana
+
+=================================
+END OF DOCUMENT
+=================================
