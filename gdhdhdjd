@@ -1,0 +1,5 @@
+# Samson Wire configuration
+samson_wire_env: PREPROD
+samson_wire_subenv: PREPROD
+samson_wire_location: LON
+samson_wire_sublocation: LON
