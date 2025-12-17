@@ -1,0 +1,36 @@
+---
+- name: Deploy Samson to Windows servers
+  hosts: all
+  gather_facts: yes
+
+  vars:
+    ansible_os_family: Windows
+
+    # --------------------------------------------------
+    # Environment (comes from Jenkins / group_vars)
+    # --------------------------------------------------
+    samson_version: "{{ SAMSON_VERSION }}"
+    samson_wire_env: "{{ ENVIRONMENT_TYPE | default('PREPROD') }}"
+    samson_wire_subenv: "{{ ENVIRONMENT_TYPE | default('PREPROD') }}"
+    samson_wire_location: "{{ host_location | default('LON') }}"
+    samson_wire_sublocation: "{{ host_location | default('LON') }}"
+
+    # --------------------------------------------------
+    # Artifactory
+    # --------------------------------------------------
+    samson_artifactory_baseurl: "{{ Base_Artifactory_URL }}"
+    samson_release_type: RELEASE
+
+    # --------------------------------------------------
+    # JDK
+    # --------------------------------------------------
+    _samson_jdk_version: "jdk-11.0.27"
+
+    # --------------------------------------------------
+    # IMPORTANT:
+    # DO NOT define samson_svc_user or samson_svc_password here
+    # They MUST come from group_vars/all.yml (CyberArk)
+    # --------------------------------------------------
+
+  roles:
+    - ansible-role-samson
