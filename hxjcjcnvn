@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+import os
+import re
+import glob
+import logging
+from datetime import datetime
+from collections import defaultdict
+
+from prometheus_client import CollectorRegistry, Gauge, pushadd_to_gateway
+
+# =====================================================
+# CONFIGURATION
+# =====================================================
+LOG_DIR = r"\\windows-share\logs"   # CHANGE THIS
+FILE_PATTERN = "ReportingTransfer_ProdLon_x64__*.log"
+
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "regulatory_reporting_processing"
+INSTANCE_NAME = "prod_lon_reporting_logs"
+
+# =====================================================
+# LOGGING
+# =====================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+logger = logging.getLogger("reg_reporting")
+
+# =====================================================
+# REGEX PATTERNS
+# =====================================================
+START_PATTERN = re.compile(
+    r"New item to access queue:\s*Message Type:\s*(?P<msg_type>[^,]+),\s*"
+    r"Trade Id:(?P<trade_id>\d+),\s*Trade Version:(?P<trade_ver>\d+)"
+)
+
+END_PATTERN = re.compile(
+    r"Successfully processed item:\s*Message Type:\s*(?P<msg_type>[^,]+),\s*"
+    r"Trade Id:\s*(?P<trade_id>\d+),\s*Trade Version:\s*(?P<trade_ver>\d+)"
+)
+
+# =====================================================
+# DATA STRUCTURES
+# =====================================================
+start_events = {}
+durations = defaultdict(list)
+counts = defaultdict(int)
+
+# =====================================================
+# HELPERS
+# =====================================================
+def parse_datetime(date_str, time_str):
+    return datetime.strptime(
+        f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S.%f"
+    )
+
+# =====================================================
+# PROCESS LOG FILES
+# =====================================================
+files = glob.glob(os.path.join(LOG_DIR, FILE_PATTERN))
+logger.info(f"Found {len(files)} log files")
+
+for file_path in files:
+    logger.info(f"Processing {file_path}")
+
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            parts = line.strip().split("|")
+            if len(parts) < 7:
+                continue
+
+            log_date, log_time = parts[0], parts[1]
+            message = parts[6]
+
+            try:
+                timestamp = parse_datetime(log_date, log_time)
+            except ValueError:
+                continue
+
+            start_match = START_PATTERN.search(message)
+            if start_match:
+                key = (
+                    start_match.group("msg_type").strip(),
+                    start_match.group("trade_id"),
+                    start_match.group("trade_ver")
+                )
+                start_events[key] = (timestamp, log_date)
+                continue
+
+            end_match = END_PATTERN.search(message)
+            if end_match:
+                key = (
+                    end_match.group("msg_type").strip(),
+                    end_match.group("trade_id"),
+                    end_match.group("trade_ver")
+                )
+
+                if key in start_events:
+                    start_time, start_date = start_events.pop(key)
+                    duration = (timestamp - start_time).total_seconds()
+
+                    durations[(key[0], key[1], key[2], start_date)].append(duration)
+                    counts[(key[0], start_date)] += 1
+
+# =====================================================
+# PROMETHEUS METRICS
+# =====================================================
+registry = CollectorRegistry()
+
+# --- Test gauge (connectivity proof)
+test_gauge = Gauge(
+    "reg_reporting_script_heartbeat",
+    "Script heartbeat (1 = script ran)",
+    ["instance"],
+    registry=registry
+)
+test_gauge.labels(instance=INSTANCE_NAME).set(1)
+
+duration_gauge = Gauge(
+    "reg_reporting_processing_seconds",
+    "Processing time per regulatory message",
+    ["message_type", "trade_id", "trade_version", "log_date", "instance"],
+    registry=registry
+)
+
+count_gauge = Gauge(
+    "reg_reporting_message_count",
+    "Total processed messages per type per day",
+    ["message_type", "log_date", "instance"],
+    registry=registry
+)
+
+# --- Populate duration gauge
+for (msg_type, trade_id, trade_ver, log_date), durs in durations.items():
+    duration_gauge.labels(
+        message_type=msg_type,
+        trade_id=trade_id,
+        trade_version=trade_ver,
+        log_date=log_date,
+        instance=INSTANCE_NAME
+    ).set(sum(durs) / len(durs))
+
+# --- Populate count gauge
+for (msg_type, log_date), cnt in counts.items():
+    count_gauge.labels(
+        message_type=msg_type,
+        log_date=log_date,
+        instance=INSTANCE_NAME
+    ).set(cnt)
+
+logger.info(f"Prepared {len(durations)} duration metrics")
+logger.info(f"Prepared {len(counts)} count metrics")
+
+# =====================================================
+# PUSH TO GATEWAY (ADD, NOT OVERWRITE)
+# =====================================================
+pushadd_to_gateway(
+    PUSHGATEWAY_URL,
+    job=JOB_NAME,
+    registry=registry
+)
+
+logger.info("✅ Metrics successfully pushed to Pushgateway")
