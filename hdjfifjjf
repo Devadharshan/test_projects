@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+import os
+import re
+import glob
+import logging
+from datetime import datetime
+from collections import defaultdict
+
+from prometheus_client import CollectorRegistry, Gauge, pushadd_to_gateway
+
+# =====================================================
+# CONFIG
+# =====================================================
+LOG_DIR = r"\\windows-share\logs"   # CHANGE THIS
+FILE_PATTERN = "ReportingTransfer_ProdLon_x64__*.log"
+
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "regulatory_reporting_processing"
+INSTANCE_NAME = "prod_lon_reporting_logs"
+
+# =====================================================
+# LOGGING
+# =====================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+logger = logging.getLogger("reg_reporting")
+
+# =====================================================
+# REGEX (UPDATED)
+# =====================================================
+START_PATTERN = re.compile(
+    r"New item to access queue:\s*Message Type:\s*(?P<msg_type>[^,]+),\s*"
+    r"Trade ID:\s*(?P<trade_id>\d+),\s*Trade Version:\s*(?P<trade_ver>\d+),\s*"
+    r"FlowID:\s*(?P<flow_id>\d+)"
+)
+
+END_PATTERN = re.compile(
+    r"Successfully processed item:\s*Message Type:\s*(?P<msg_type>[^,]+),\s*"
+    r"Trade ID:\s*(?P<trade_id>\d+),\s*Trade Version:\s*(?P<trade_ver>\d+),\s*"
+    r"FlowID:\s*(?P<flow_id>\d+)"
+)
+
+TEMPLATE_PATTERN = re.compile(
+    r"Sent Template:\s*(?P<template>[A-Za-z0-9\-_.]+)"
+)
+
+# =====================================================
+# DATA STRUCTURES
+# =====================================================
+# key = (msg_type, trade_id, trade_ver)
+start_events = {}
+
+# key = (msg_type, trade_id, trade_ver, log_date, flow_id, template)
+durations = defaultdict(list)
+
+# key = (msg_type, log_date)
+counts = defaultdict(int)
+
+# =====================================================
+# HELPERS
+# =====================================================
+def parse_datetime(date_str, time_str):
+    return datetime.strptime(
+        f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S.%f"
+    )
+
+# =====================================================
+# PROCESS FILES
+# =====================================================
+files = glob.glob(os.path.join(LOG_DIR, FILE_PATTERN))
+logger.info(f"Found {len(files)} files")
+
+for file_path in files:
+    logger.info(f"Processing {file_path}")
+
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            parts = line.strip().split("|")
+            if len(parts) < 7:
+                continue
+
+            log_date, log_time = parts[0], parts[1]
+            message = parts[6]
+
+            try:
+                ts = parse_datetime(log_date, log_time)
+            except ValueError:
+                continue
+
+            # ---------------- START ----------------
+            sm = START_PATTERN.search(message)
+            if sm:
+                key = (
+                    sm.group("msg_type").strip(),
+                    sm.group("trade_id"),
+                    sm.group("trade_ver")
+                )
+                start_events[key] = (
+                    ts,
+                    log_date,
+                    sm.group("flow_id")
+                )
+                continue
+
+            # ---------------- END ----------------
+            em = END_PATTERN.search(message)
+            if em:
+                key = (
+                    em.group("msg_type").strip(),
+                    em.group("trade_id"),
+                    em.group("trade_ver")
+                )
+
+                if key in start_events:
+                    start_ts, start_date, flow_id = start_events.pop(key)
+                    duration = (ts - start_ts).total_seconds()
+
+                    template_match = TEMPLATE_PATTERN.search(message)
+                    template = (
+                        template_match.group("template")
+                        if template_match else "none"
+                    )
+
+                    durations[(
+                        key[0],
+                        key[1],
+                        key[2],
+                        start_date,
+                        flow_id,
+                        template
+                    )].append(duration)
+
+                    counts[(key[0], start_date)] += 1
+
+# =====================================================
+# PROMETHEUS METRICS
+# =====================================================
+registry = CollectorRegistry()
+
+heartbeat = Gauge(
+    "reg_reporting_script_heartbeat",
+    "Script heartbeat",
+    ["instance"],
+    registry=registry
+)
+heartbeat.labels(instance=INSTANCE_NAME).set(1)
+
+duration_gauge = Gauge(
+    "reg_reporting_processing_seconds",
+    "Processing duration",
+    [
+        "message_type",
+        "trade_id",
+        "trade_version",
+        "flow_id",
+        "sent_template",
+        "log_date",
+        "instance"
+    ],
+    registry=registry
+)
+
+count_gauge = Gauge(
+    "reg_reporting_message_count",
+    "Processed message count per day",
+    ["message_type", "log_date", "instance"],
+    registry=registry
+)
+
+# Populate duration gauge
+for (msg, tid, ver, date, flow, tmpl), durs in durations.items():
+    duration_gauge.labels(
+        message_type=msg,
+        trade_id=tid,
+        trade_version=ver,
+        flow_id=flow,
+        sent_template=tmpl,
+        log_date=date,
+        instance=INSTANCE_NAME
+    ).set(sum(durs) / len(durs))
+
+# Populate count gauge
+for (msg, date), cnt in counts.items():
+    count_gauge.labels(
+        message_type=msg,
+        log_date=date,
+        instance=INSTANCE_NAME
+    ).set(cnt)
+
+pushadd_to_gateway(
+    PUSHGATEWAY_URL,
+    job=JOB_NAME,
+    registry=registry
+)
+
+logger.info("✅ Metrics pushed successfully")
