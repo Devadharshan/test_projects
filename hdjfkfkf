@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+import os
+import re
+from glob import glob
+from datetime import datetime
+from prometheus_client import CollectorRegistry, Gauge, pushadd_to_gateway, push_to_gateway
+
+# ---------------- CONFIG ----------------
+LOG_DIR = r"C:\path\to\logs"
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "log_metrics_job"
+
+# ---------------- REGEX ----------------
+FILE_REGEX = re.compile(r"^(AppFIMLImporter\d*)_.*__([\d\-]+)\.log$", re.IGNORECASE)
+
+START_RE = re.compile(
+    r"Found\s+MQ\s+M(?:esaage|essage)\s+ID\s*\[Hex\]\s*=\s*\[(.*?)\]",
+    re.IGNORECASE
+)
+
+END_RE = re.compile(
+    r"(?:Save|Saving)\s+trade\s*\[(.*?)\]",
+    re.IGNORECASE
+)
+
+FAILED_MQ_RE = re.compile(
+    r"Sales\s+Team\s+\[.*?\]\s+is\s+not\s+valid\s+for\s+user\s+\[.*?\]",
+    re.IGNORECASE
+)
+
+QPROXY_RE = re.compile(
+    r"Received RequestManagerCall response from QProxy for Requestid\s+(\d+)\s+in\s+([\d.]+)\s*s",
+    re.IGNORECASE
+)
+
+PV01_RE = re.compile(
+    r"Received PV01 response from QProxy for\s+(\d+)\s+with Request Id\s+(\d+)\s+in\s+([\d\.]+)\s*s(?:\s*\[\*\*SLOW\*\*\])?",
+    re.IGNORECASE
+)
+
+# ---------------- HELPERS ----------------
+def extract_name_and_date(filename):
+    m = FILE_REGEX.match(os.path.basename(filename))
+    return (m.group(1), m.group(2)) if m else (None, None)
+
+def parse_line_ts(parts):
+    if len(parts) >= 2:
+        try:
+            return datetime.strptime(
+                f"{parts[0].strip()} {parts[1].strip()}",
+                "%Y-%m-%d %H:%M:%S.%f"
+            )
+        except Exception:
+            pass
+    for p in parts:
+        try:
+            return datetime.strptime(p.strip(), "%Y-%m-%d %H:%M:%S.%f")
+        except Exception:
+            continue
+    return None
+
+# ---------------- PROCESS FILES ----------------
+pattern = os.path.join(LOG_DIR, "AppFIMLImporter*_ProdLon_x64__*.log")
+files = sorted(glob(pattern))
+
+file_results = {}
+
+for fpath in files:
+    name, file_date = extract_name_and_date(fpath)
+    if not name:
+        continue
+
+    start_frames = []
+    trades = []
+    qproxy_calls = []
+    pv01_calls = []
+    mq_total = 0
+    mq_failed = 0
+
+    with open(fpath, "r", errors="ignore") as fh:
+        for raw in fh:
+            parts = raw.rstrip("\n").split("|")
+            ts = parse_line_ts(parts)
+            if ts is None:
+                continue
+
+            msg = parts[6].strip() if len(parts) >= 7 else ""
+
+            m = START_RE.search(msg)
+            if m:
+                mq_total += 1
+                start_frames.append({
+                    "start_ts": ts,
+                    "msg_id": m.group(1),
+                    "qproxy": [],
+                    "pv01": []
+                })
+                continue
+
+            if FAILED_MQ_RE.search(msg):
+                mq_failed += 1
+
+            m = QPROXY_RE.search(msg)
+            if m:
+                rec = {"request_id": m.group(1), "duration": float(m.group(2))}
+                if start_frames:
+                    start_frames[-1]["qproxy"].append(rec)
+                else:
+                    qproxy_calls.append({**rec, "trade_id": None})
+                continue
+
+            m = PV01_RE.search(msg)
+            if m:
+                rec = {
+                    "value": m.group(1),
+                    "request_id": m.group(2),
+                    "duration": float(m.group(3))
+                }
+                if start_frames:
+                    start_frames[-1]["pv01"].append(rec)
+                else:
+                    pv01_calls.append({**rec, "trade_id": None})
+                continue
+
+            m = END_RE.search(msg)
+            if m:
+                trade_id = m.group(1)
+                idx = None
+                for i in range(len(start_frames) - 1, -1, -1):
+                    if start_frames[i]["start_ts"] <= ts:
+                        idx = i
+                        break
+                if idx is None:
+                    continue
+
+                frame = start_frames.pop(idx)
+                duration = (ts - frame["start_ts"]).total_seconds()
+                if duration < 0:
+                    continue
+
+                trades.append({
+                    "trade_id": trade_id,
+                    "message_id": frame["msg_id"],
+                    "duration": duration
+                })
+
+                for q in frame["qproxy"]:
+                    qproxy_calls.append({**q, "trade_id": trade_id})
+                for p in frame["pv01"]:
+                    pv01_calls.append({**p, "trade_id": trade_id})
+
+    file_results[os.path.basename(fpath)] = {
+        "name": name,
+        "file_date": file_date,
+        "mq_total": mq_total,
+        "mq_failed": mq_failed,
+        "trades": trades,
+        "qproxy": qproxy_calls,
+        "pv01": pv01_calls
+    }
+
+# ---------------- PROMETHEUS ----------------
+registry = CollectorRegistry()
+
+labels = ["name", "file_name", "file_date"]
+
+g_mq_total = Gauge("log_mq_messages_total", "MQ messages", labels, registry=registry)
+g_mq_failed = Gauge("log_failed_mq_messages_total", "Failed MQ messages", labels, registry=registry)
+g_trades_total = Gauge("log_trades_processed_total", "Trades processed", labels, registry=registry)
+
+g_trade_duration = Gauge(
+    "log_trade_duration_seconds",
+    "Trade duration",
+    ["name", "file_name", "file_date", "trade_id", "message_id"],
+    registry=registry
+)
+
+g_qproxy = Gauge(
+    "log_qproxy_request_time_seconds",
+    "QProxy request time",
+    ["name", "file_name", "file_date", "request_id", "trade_id"],
+    registry=registry
+)
+
+g_pv01 = Gauge(
+    "log_qproxy_pv01_time_seconds",
+    "PV01 time",
+    ["name", "file_name", "file_date", "value", "request_id", "trade_id"],
+    registry=registry
+)
+
+for fname, d in file_results.items():
+    g_mq_total.labels(d["name"], fname, d["file_date"]).set(d["mq_total"])
+    g_mq_failed.labels(d["name"], fname, d["file_date"]).set(d["mq_failed"])
+    g_trades_total.labels(d["name"], fname, d["file_date"]).set(len(d["trades"]))
+
+    for t in d["trades"]:
+        g_trade_duration.labels(
+            d["name"], fname, d["file_date"],
+            t["trade_id"], t["message_id"]
+        ).set(t["duration"])
+
+    for q in d["qproxy"]:
+        g_qproxy.labels(
+            d["name"], fname, d["file_date"],
+            q["request_id"], q["trade_id"]
+        ).set(q["duration"])
+
+    for p in d["pv01"]:
+        g_pv01.labels(
+            d["name"], fname, d["file_date"],
+            p["value"], p["request_id"], p["trade_id"]
+        ).set(p["duration"])
+
+try:
+    pushadd_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+except Exception:
+    push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
