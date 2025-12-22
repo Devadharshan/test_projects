@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+import os
+import re
+import logging
+from glob import glob
+from datetime import datetime
+from prometheus_client import CollectorRegistry, Gauge, pushadd_to_gateway, push_to_gateway
+
+# ---------------- CONFIG ----------------
+LOG_DIR = r"C:\path\to\logs"
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "log_metrics_job"
+
+# ---------------- LOGGING ----------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+logger = logging.getLogger("trade_log_parser")
+
+# ---------------- FILE REGEX ----------------
+FILE_REGEX = re.compile(
+    r"^(AppFIMLImporter\d*)_.*__([\d\-]+)\.log$",
+    re.IGNORECASE
+)
+
+# ---------------- MESSAGE REGEX ----------------
+START_RE = re.compile(
+    r"Found\s+MQ\s+M(?:esaage|essage)\s+ID\s*\[Hex\]\s*=\s*\[(.*?)\]",
+    re.IGNORECASE
+)
+
+END_RE = re.compile(
+    r"(?:Save|Saving)\s+trade\s+\[(.*?)\].*complete",
+    re.IGNORECASE
+)
+
+FAILED_RE = re.compile(
+    r"Sales Team \[.*?\] is not valid for user \[.*?\]",
+    re.IGNORECASE
+)
+
+QPROXY_RE = re.compile(
+    r"Received RequestManagerCall response from QProxy for Requestid\s+(\d+)\s+in\s+([\d.]+)\s*s",
+    re.IGNORECASE
+)
+
+PV01_RE = re.compile(
+    r"Received PV01 response from QProxy for\s+(\d+)\s+with Request Id\s+(\d+)\s+in\s+([\d.]+)\s*s",
+    re.IGNORECASE
+)
+
+# ---------------- HELPERS ----------------
+def extract_name_date(filename):
+    m = FILE_REGEX.match(filename)
+    if m:
+        return m.group(1), m.group(2)
+    return None, None
+
+def parse_ts(parts):
+    """
+    Robust timestamp parser:
+    Tries parts[0]|parts[1] first, then scans all parts.
+    """
+    if len(parts) >= 2:
+        try:
+            return datetime.strptime(
+                f"{parts[0].strip()} {parts[1].strip()}",
+                "%Y-%m-%d %H:%M:%S.%f"
+            )
+        except:
+            pass
+
+    for p in parts:
+        try:
+            return datetime.strptime(p.strip(), "%Y-%m-%d %H:%M:%S.%f")
+        except:
+            continue
+    return None
+
+# ---------------- PROCESS FILES ----------------
+def process_files():
+    files = sorted(glob(os.path.join(LOG_DIR, "AppFIMLImporter*_ProdLon_x64__*.log")))
+    logger.info("Found %d log files", len(files))
+
+    results = {}
+
+    for path in files:
+        base = os.path.basename(path)
+        name, file_date = extract_name_date(base)
+        if not name:
+            continue
+
+        logger.info("Processing %s", base)
+
+        start_frames = []
+        trades = []
+        qproxy = []
+        pv01 = []
+        mq_total = 0
+        mq_failed = 0
+
+        with open(path, "r", errors="ignore") as f:
+            for lineno, line in enumerate(f, 1):
+                parts = line.rstrip("\n").split("|")
+                ts = parse_ts(parts)
+                if not ts:
+                    continue
+
+                msg = parts[6].strip() if len(parts) >= 7 else ""
+
+                # START
+                m = START_RE.search(msg)
+                if m:
+                    mq_total += 1
+                    start_frames.append({
+                        "start_ts": ts,
+                        "msg_id": m.group(1),
+                        "qproxy": [],
+                        "pv01": []
+                    })
+                    continue
+
+                # FAILED
+                if FAILED_RE.search(msg):
+                    mq_failed += 1
+
+                # QPROXY
+                m = QPROXY_RE.search(msg)
+                if m:
+                    if start_frames:
+                        start_frames[-1]["qproxy"].append({
+                            "request_id": m.group(1),
+                            "duration": float(m.group(2))
+                        })
+                    continue
+
+                # PV01
+                m = PV01_RE.search(msg)
+                if m:
+                    if start_frames:
+                        start_frames[-1]["pv01"].append({
+                            "value": m.group(1),
+                            "request_id": m.group(2),
+                            "duration": float(m.group(3))
+                        })
+                    continue
+
+                # END
+                m = END_RE.search(msg)
+                if m:
+                    trade_id = m.group(1)
+
+                    # nearest valid start
+                    idx = None
+                    for i in range(len(start_frames)-1, -1, -1):
+                        if start_frames[i]["start_ts"] <= ts:
+                            idx = i
+                            break
+
+                    if idx is None:
+                        logger.warning("No START for trade %s at line %d", trade_id, lineno)
+                        continue
+
+                    frame = start_frames.pop(idx)
+                    duration = (ts - frame["start_ts"]).total_seconds()
+
+                    trades.append({
+                        "trade_id": trade_id,
+                        "message_id": frame["msg_id"],
+                        "duration": duration
+                    })
+
+                    for q in frame["qproxy"]:
+                        qproxy.append({
+                            "trade_id": trade_id,
+                            **q
+                        })
+                    for p in frame["pv01"]:
+                        pv01.append({
+                            "trade_id": trade_id,
+                            **p
+                        })
+
+        results[base] = {
+            "name": name,
+            "date": file_date,
+            "mq_total": mq_total,
+            "mq_failed": mq_failed,
+            "trades": trades,
+            "qproxy": qproxy,
+            "pv01": pv01
+        }
+
+        logger.info(
+            "%s → MQ=%d Failed=%d Trades=%d",
+            base, mq_total, mq_failed, len(trades)
+        )
+
+    return results
+
+# ---------------- PUSH METRICS ----------------
+def push_metrics(results):
+    registry = CollectorRegistry()
+
+    g_mq = Gauge("log_mq_messages_total", "MQ found", ["name","file","date"], registry)
+    g_fail = Gauge("log_failed_messages_total", "Failed messages", ["name","file","date"], registry)
+    g_trades = Gauge("log_trades_processed_total", "Trades processed", ["name","file","date"], registry)
+    g_duration = Gauge(
+        "log_trade_duration_seconds",
+        "Trade processing time",
+        ["name","file","date","trade_id","message_id"],
+        registry
+    )
+
+    for file, d in results.items():
+        g_mq.labels(d["name"], file, d["date"]).set(d["mq_total"])
+        g_fail.labels(d["name"], file, d["date"]).set(d["mq_failed"])
+        g_trades.labels(d["name"], file, d["date"]).set(len(d["trades"]))
+
+        for t in d["trades"]:
+            g_duration.labels(
+                d["name"], file, d["date"],
+                t["trade_id"], t["message_id"]
+            ).set(t["duration"])
+
+    try:
+        pushadd_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+        logger.info("Metrics pushed successfully")
+    except Exception as e:
+        logger.warning("pushadd failed (%s), trying push", e)
+        push_to_gateway(PUSHGATEWAY_URL, job=JOB_NAME, registry=registry)
+
+# ---------------- MAIN ----------------
+if __name__ == "__main__":
+    results = process_files()
+    push_metrics(results)
+    logger.info("Done.")
