@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+import os
+import re
+import glob
+import time
+import logging
+from datetime import datetime, date
+from collections import defaultdict
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# =====================================================
+# CONFIG
+# =====================================================
+LOG_DIR = r"\\windows-share\logs"
+FILE_PATTERN = "ReportingTransfer_ProdLon_x64__*.log"
+
+PUSHGATEWAY_URL = "http://localhost:9091"
+JOB_NAME = "regulatory_reporting_processing"
+
+DEBUG_LOG_DIR = r"C:\reg_reporting_debug"
+SCAN_INTERVAL_SEC = 5   # filesystem polling only (not push)
+
+# =====================================================
+# SETUP
+# =====================================================
+os.makedirs(DEBUG_LOG_DIR, exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+logger = logging.getLogger("reg_reporting_live")
+
+# =====================================================
+# REGEX
+# =====================================================
+START_PATTERN = re.compile(
+    r"RegulatoryReporting(?:Importer|Exporter):\s*"
+    r"New item to assess queue:\s*"
+    r"Message Type:\s*(?P<msg_type>[^,]+),\s*"
+    r"Trade ID:\s*(?P<trade_id>\d+),\s*"
+    r"Trade Version:\s*(?P<trade_ver>\d+)",
+    re.IGNORECASE
+)
+
+END_PATTERN = re.compile(
+    r"RegulatoryReporting(?:Importer|Exporter):\s*"
+    r"Successfully processed item:\s*"
+    r"Message Type:\s*(?P<msg_type>[^,]+),\s*"
+    r"Trade ID:\s*(?P<trade_id>\d+),\s*"
+    r"Trade Version:\s*(?P<trade_ver>\d+)",
+    re.IGNORECASE
+)
+
+# =====================================================
+# HELPERS
+# =====================================================
+def parse_dt(d, t):
+    return datetime.strptime(f"{d} {t}", "%Y-%m-%d %H:%M:%S.%f")
+
+# =====================================================
+# STATE (IN-MEMORY ONLY)
+# =====================================================
+last_file_state = {}     # file_path -> size
+last_metric_signature = None
+
+logger.info("🚀 Live regulatory reporting monitor started (event-driven mode)")
+
+# =====================================================
+# MAIN LOOP
+# =====================================================
+while True:
+    try:
+        today = date.today().isoformat()
+        files = glob.glob(os.path.join(LOG_DIR, FILE_PATTERN))
+
+        files_changed = False
+
+        # ---- detect new or grown files ----
+        for f in files:
+            size = os.path.getsize(f)
+            if f not in last_file_state or size > last_file_state[f]:
+                files_changed = True
+                last_file_state[f] = size
+
+        if not files_changed:
+            time.sleep(SCAN_INTERVAL_SEC)
+            continue
+
+        # ---- recompute metrics (today only) ----
+        start_events = {}
+        durations = defaultdict(list)
+        message_counts = defaultdict(int)
+        trade_ids = defaultdict(set)
+
+        debug_log_file = os.path.join(
+            DEBUG_LOG_DIR, f"reg_reporting_time_{today}.log"
+        )
+
+        for file_path in files:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    parts = line.strip().split("|")
+                    if len(parts) < 7:
+                        continue
+
+                    log_date, log_time = parts[0], parts[1]
+                    if log_date != today:
+                        continue
+
+                    ts = parse_dt(log_date, log_time)
+                    msg = parts[6]
+
+                    sm = START_PATTERN.search(msg)
+                    if sm:
+                        key = (
+                            sm.group("msg_type"),
+                            sm.group("trade_id"),
+                            sm.group("trade_ver")
+                        )
+                        start_events[key] = ts
+                        continue
+
+                    em = END_PATTERN.search(msg)
+                    if em:
+                        key = (
+                            em.group("msg_type"),
+                            em.group("trade_id"),
+                            em.group("trade_ver")
+                        )
+                        if key in start_events:
+                            duration = (ts - start_events.pop(key)).total_seconds()
+                            durations[(key[0], key[1], key[2], today)].append(duration)
+                            message_counts[(key[0], today)] += 1
+                            trade_ids[(key[0], today)].add(key[1])
+
+        # ---- metric signature (detect real change) ----
+        metric_signature = (
+            tuple(sorted(message_counts.items())),
+            tuple(sorted((k, len(v)) for k, v in trade_ids.items()))
+        )
+
+        if metric_signature == last_metric_signature:
+            logger.info("🔸 New logs but no metric change — skipping push")
+            time.sleep(SCAN_INTERVAL_SEC)
+            continue
+
+        last_metric_signature = metric_signature
+
+        # ---- PUSH TO PROMETHEUS ----
+        registry = CollectorRegistry()
+
+        Gauge(
+            "reg_reporting_script_heartbeat",
+            "Script heartbeat",
+            [],
+            registry=registry
+        ).set(1)
+
+        duration_gauge = Gauge(
+            "reg_reporting_processing_seconds",
+            "Processing duration",
+            ["message_type", "trade_id", "trade_version", "log_date"],
+            registry=registry
+        )
+
+        msg_gauge = Gauge(
+            "reg_reporting_message_count",
+            "Message count",
+            ["message_type", "log_date"],
+            registry=registry
+        )
+
+        trade_gauge = Gauge(
+            "reg_reporting_trade_count",
+            "Trade count",
+            ["message_type", "log_date"],
+            registry=registry
+        )
+
+        for (m, t, v, d), vals in durations.items():
+            duration_gauge.labels(m, t, v, d).set(sum(vals) / len(vals))
+
+        for (m, d), c in message_counts.items():
+            msg_gauge.labels(m, d).set(c)
+
+        for (m, d), trades in trade_ids.items():
+            trade_gauge.labels(m, d).set(len(trades))
+
+        push_to_gateway(
+            PUSHGATEWAY_URL,
+            job=JOB_NAME,
+            grouping_key={"mode": "live"},
+            registry=registry
+        )
+
+        logger.info("✅ Metrics updated & pushed (new data detected)")
+
+    except Exception as e:
+        logger.exception(f"❌ Error in live loop: {e}")
+
+    time.sleep(SCAN_INTERVAL_SEC)
