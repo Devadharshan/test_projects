@@ -1,0 +1,159 @@
+/*
+=========================================================
+ Focus – Windows Housekeeping Pipeline
+=========================================================
+ - TARGET_GROUP selected by user
+ - REGION auto-derived from TARGET_GROUP
+ - ENV auto-derived from TARGET_GROUP
+ - ALL runs from EMEA agent
+ - CyberArk cert map included
+=========================================================
+*/
+
+/* ---------- CYBERARK CERT DEFINITIONS ---------- */
+
+// Jenkins credential ID for CyberArk CA bundle
+def cyberarkCAFile = "CA_Bundle.pem"
+
+// CyberArk certificate mapping
+def certificateMap = [
+    EMEA: [
+        PRD: [ IV2: 'IV2AFOCUS-OPSP', IV1: 'AIM-IV1FOCUS-OPSP-EMEA-Cyberark' ],
+        STG: [ IV2: 'IV2AFOCUS-OPSP', IV1: 'AIM-IV1FOCUS-OPSP-EMEA-Cyberark' ],
+        DEV: [ IV2: 'IV2AFOCUS-OPSD', IV1: 'AIM-FOCUS-OPSD-Cyberark' ]
+    ],
+    AMER: [
+        PRD: [ IV2: 'IV2RFOCUS-OPSP', IV1: 'AIM-FOCUS-NAR-OPSP-Cyberark' ],
+        STG: [ IV2: 'IV2RFOCUS-OPSP', IV1: 'AIM-FOCUS-NAR-OPSP-Cyberark' ],
+        DEV: [ IV2: 'IV2RFOCUS-OPSD', IV1: 'AIM-FOCUS-NAR-OPSD' ]
+    ],
+    APAC: [
+        PRD: [ IV2: 'IV2CFOCUS-OPSP', IV1: 'AIM-FOCUS-APAC-OPSP-Cyberark' ],
+        STG: [ IV2: 'IV2CFOCUS-OPSP', IV1: 'AIM-FOCUS-APAC-OPSP-Cyberark' ],
+        DEV: [ IV2: 'IV2CFOCUS-OPSD', IV1: 'AIM-FOCUS-APAC-OPSD' ]
+    ]
+]
+
+/* ---------- HELPER FUNCTIONS ---------- */
+
+def deriveRegionFromGroup(String group) {
+    if (group == 'ALL') return 'EMEA'
+    if (group.contains('-EMEA')) return 'EMEA'
+    if (group.contains('-AMER')) return 'AMER'
+    if (group.contains('-APAC')) return 'APAC'
+    error "Unable to derive REGION from TARGET_GROUP: ${group}"
+}
+
+def deriveEnvFromGroup(String group) {
+    if (group == 'ALL') return 'PRD'
+    if (group.contains('-PRD')) return 'PRD'
+    if (group.contains('-STG')) return 'STG'
+    if (group.contains('-DEV')) return 'DEV'
+    error "Unable to derive ENV from TARGET_GROUP: ${group}"
+}
+
+def getAgentLabel(String region) {
+    switch (region) {
+        case 'EMEA':
+            return 'bnpp-deploytools-emea'
+        case 'AMER':
+            return 'bnpp-deploytools-amer'
+        case 'APAC':
+            return 'bnpp-deploytools-apac'
+        default:
+            error "Invalid REGION: ${region}"
+    }
+}
+
+/* ---------- PIPELINE ---------- */
+
+pipeline {
+    agent none
+
+    options {
+        disableConcurrentBuilds()
+        timestamps()
+    }
+
+    parameters {
+        choice(
+            name: 'TARGET_GROUP',
+            choices: [
+                'IV2-STG-WIN-EMEA',
+                'IV2-PRD-WIN-EMEA',
+                'IV2-STG-WIN-AMER',
+                'IV2-PRD-WIN-AMER',
+                'IV2-STG-WIN-APAC',
+                'IV2-PRD-WIN-APAC',
+                'ALL'
+            ],
+            description: 'Select Ansible inventory group (ALL runs from EMEA)'
+        )
+
+        booleanParam(
+            name: 'DRY_RUN',
+            defaultValue: true,
+            description: 'Dry run mode (no deletions)'
+        )
+    }
+
+    stages {
+
+        stage('Derive Context & Validate') {
+            agent any
+            steps {
+                script {
+                    env.REGION = deriveRegionFromGroup(params.TARGET_GROUP)
+                    env.ENVIRONMENT = deriveEnvFromGroup(params.TARGET_GROUP)
+
+                    def certBase = certificateMap[env.REGION][env.ENVIRONMENT]['IV2']
+
+                    env.CYBERARK_CERT_FILE = "${certBase}.crt"
+                    env.CYBERARK_KEY_FILE  = "${certBase}.key"
+                    env.CYBERARK_CA_FILE   = cyberarkCAFile
+
+                    echo "--------------------------------------------"
+                    echo "TARGET_GROUP   : ${params.TARGET_GROUP}"
+                    echo "REGION         : ${env.REGION}"
+                    echo "ENVIRONMENT    : ${env.ENVIRONMENT}"
+                    echo "DRY_RUN        : ${params.DRY_RUN}"
+                    echo "CYBERARK CERT  : ${env.CYBERARK_CERT_FILE}"
+                    echo "CYBERARK KEY   : ${env.CYBERARK_KEY_FILE}"
+                    echo "CA CERT        : ${env.CYBERARK_CA_FILE}"
+                    echo "--------------------------------------------"
+
+                    // SAFETY GUARD
+                    if (params.TARGET_GROUP == 'ALL' && params.DRY_RUN == false) {
+                        error "❌ ALL execution without DRY_RUN is blocked for safety"
+                    }
+                }
+            }
+        }
+
+        stage('Run Housekeeping') {
+            agent {
+                label getAgentLabel(env.REGION)
+            }
+            steps {
+                script {
+                    sh """
+                        ansible-playbook \
+                          -i ansible/inventories/hosts.ini \
+                          ansible/housekeeping.yml \
+                          --limit ${params.TARGET_GROUP} \
+                          -e cleanup_dry_run=${params.DRY_RUN}
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Housekeeping completed successfully"
+        }
+        failure {
+            echo "❌ Housekeeping failed – check Jenkins & Ansible logs"
+        }
+    }
+}
