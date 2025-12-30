@@ -1,0 +1,144 @@
+/*
+=========================================================
+ Focus – Windows Housekeeping Pipeline
+=========================================================
+ - Agent selected ONCE at pipeline level
+ - Uses ternary expression (sample style)
+ - No stage-level agents
+ - No agent any
+=========================================================
+*/
+
+/* ---------------- CYBERARK CONFIG ---------------- */
+
+def cyberarkCAFile = "CA_Bundle.pem"
+
+def certificateMap = [
+    EMEA: [
+        PRD: [ IV2: 'IV2AFOCUS-OPSP' ],
+        STG: [ IV2: 'IV2AFOCUS-OPSP' ],
+        DEV: [ IV2: 'IV2AFOCUS-OPSD' ]
+    ],
+    AMER: [
+        PRD: [ IV2: 'IV2RFOCUS-OPSP' ],
+        STG: [ IV2: 'IV2RFOCUS-OPSP' ],
+        DEV: [ IV2: 'IV2RFOCUS-OPSD' ]
+    ],
+    APAC: [
+        PRD: [ IV2: 'IV2CFOCUS-OPSP' ],
+        STG: [ IV2: 'IV2CFOCUS-OPSP' ],
+        DEV: [ IV2: 'IV2CFOCUS-OPSD' ]
+    ]
+]
+
+pipeline {
+
+    /* ================= AGENT (SAMPLE STYLE) ================= */
+    agent {
+        label params.REGION == "EMEA" ? "bnpp-deploytools" :
+              params.REGION == "APAC" ? "bnpp-deploytools-apac" :
+              params.REGION == "AMER" ? "bnpp-deploytools-amer" :
+              params.INFRA_TYPE == "ETS" ? "${REGION}" :
+              params.REGION
+    }
+
+    options {
+        disableConcurrentBuilds()
+        timestamps()
+    }
+
+    /* ================= PARAMETERS ================= */
+    parameters {
+        choice(
+            name: 'REGION',
+            choices: ['EMEA', 'AMER', 'APAC'],
+            description: 'Region'
+        )
+
+        choice(
+            name: 'ENVIRONMENT_TYPE',
+            choices: ['STG', 'PRD', 'DEV'],
+            description: 'Environment Type'
+        )
+
+        choice(
+            name: 'TARGET_GROUP',
+            choices: [
+                'IV2-WIN-EMEA',
+                'IV2-WIN-AMER',
+                'IV2-WIN-APAC',
+                'ALL'
+            ],
+            description: 'Inventory group'
+        )
+
+        booleanParam(
+            name: 'DRY_RUN',
+            defaultValue: true,
+            description: 'Dry run mode'
+        )
+    }
+
+    environment {
+        SHARED_BITBUCKET_SSH_KEY = 'BITBUCKET_public_access_auth_usr'
+    }
+
+    stages {
+
+        /* ================= SELECT CERTIFICATES ================= */
+        stage('Select Certificates') {
+            steps {
+                script {
+                    def certBase = certificateMap[params.REGION][params.ENVIRONMENT_TYPE]['IV2']
+                    env.CYBERARK_CERT_FILE = "${certBase}.crt"
+                    env.CYBERARK_KEY_FILE  = "${certBase}.key"
+                    env.CYBERARK_CA_FILE   = cyberarkCAFile
+
+                    echo "Selected cert base: ${certBase}"
+                }
+            }
+        }
+
+        /* ================= SAFETY CHECK ================= */
+        stage('Safety Check') {
+            steps {
+                script {
+                    if (params.TARGET_GROUP == 'ALL' &&
+                        params.ENVIRONMENT_TYPE == 'PRD' &&
+                        params.DRY_RUN == false) {
+                        error "❌ ALL + PRD without DRY_RUN is BLOCKED"
+                    }
+                }
+            }
+        }
+
+        /* ================= RUN HOUSEKEEPING ================= */
+        stage('Run Housekeeping') {
+            steps {
+                echo "Running housekeeping"
+                echo "Region      : ${params.REGION}"
+                echo "Environment : ${params.ENVIRONMENT_TYPE}"
+                echo "TargetGroup : ${params.TARGET_GROUP}"
+                echo "Dry Run     : ${params.DRY_RUN}"
+
+                sh """
+                    ansible-playbook \
+                      -i ansible/inventories/hosts.ini \
+                      ansible/housekeeping.yml \
+                      --limit ${params.TARGET_GROUP} \
+                      -e cleanup_dry_run=${params.DRY_RUN} \
+                      -e environment=${params.ENVIRONMENT_TYPE}
+                """
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Housekeeping completed successfully"
+        }
+        failure {
+            echo "❌ Housekeeping failed"
+        }
+    }
+}
