@@ -1,0 +1,181 @@
+- name: Windows housekeeping – JSON driven
+  hosts: all
+  gather_facts: no
+
+  tasks:
+    - meta: end_play
+      when: not cleanup_enabled | default(false)
+
+    - name: Ensure housekeeping directory exists
+      win_file:
+        path: D:\APPS\Aps\housekeeping
+        state: directory
+
+    - name: Ensure log directory exists
+      win_file:
+        path: D:\APPS\Aps\housekeeping\logs
+        state: directory
+
+    - name: Copy housekeeping script (latest)
+      win_copy:
+        src: scripts/cleanup_agent.py
+        dest: D:\APPS\Aps\housekeeping\cleanup_agent.py
+
+    - name: Copy housekeeping config (latest)
+      win_copy:
+        src: config/cleanup_rules.json
+        dest: D:\APPS\Aps\housekeeping\cleanup_rules.json
+
+    - name: Run housekeeping
+      win_command: python D:\APPS\Aps\housekeeping\cleanup_agent.py
+      environment:
+        CLEANUP_ENABLED: "{{ cleanup_enabled }}"
+        CLEANUP_DRY_RUN: "{{ cleanup_dry_run }}"
+
+
+
+{
+  "global": {
+    "log_dir": "D:/APPS/Aps/housekeeping/logs",
+    "max_deletes": 1000
+  },
+
+  "servers": {
+    "EURV0I147892": {
+      "paths": [
+        {
+          "path": "C:/app/logs",
+          "extensions": [".log", ".out", ".err"],
+          "retention_days": 7
+        },
+        {
+          "path": "D:/temp/data",
+          "extensions": [".tmp", ".bak"],
+          "retention_days": 2
+        }
+      ]
+    }
+  }
+}
+
+
+import os
+import json
+import socket
+import logging
+from datetime import datetime, timedelta
+
+# ---------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------
+HOSTNAME = socket.gethostname().upper()
+
+BASE_DIR = r"D:\APPS\Aps\housekeeping"
+CONFIG_FILE = os.path.join(BASE_DIR, "cleanup_rules.json")
+
+# ---------------------------------------------------------
+# HELPERS
+# ---------------------------------------------------------
+def load_config():
+    with open(CONFIG_FILE, "r") as f:
+        return json.load(f)
+
+def is_older_than(file_path, retention_days):
+    cutoff = datetime.now() - timedelta(days=retention_days)
+    return datetime.fromtimestamp(os.path.getmtime(file_path)) < cutoff
+
+# ---------------------------------------------------------
+# MAIN CLEANUP LOGIC
+# ---------------------------------------------------------
+def main():
+    # Read execution flags from environment (set by Ansible)
+    cleanup_enabled = os.getenv("CLEANUP_ENABLED", "false").lower() == "true"
+    dry_run = os.getenv("CLEANUP_DRY_RUN", "true").lower() == "true"
+
+    if not cleanup_enabled:
+        return
+
+    config = load_config()
+
+    global_cfg = config.get("global", {})
+    log_dir = global_cfg.get("log_dir", os.path.join(BASE_DIR, "logs"))
+    max_deletes = int(global_cfg.get("max_deletes", 1000))
+
+    os.makedirs(log_dir, exist_ok=True)
+
+    log_file = os.path.join(log_dir, f"cleanup_{HOSTNAME}.log")
+    logging.basicConfig(
+        filename=log_file,
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(message)s"
+    )
+
+    logging.info("Cleanup started")
+
+    server_cfg = config.get("servers", {}).get(HOSTNAME)
+
+    if not server_cfg:
+        logging.info("No cleanup rules defined for this server")
+        return
+
+    rules = server_cfg.get("paths", [])
+    delete_count = 0
+    touched_dirs = set()
+
+    for rule in rules:
+        base_path = rule["path"]
+        retention_days = rule["retention_days"]
+        extensions = [ext.lower() for ext in rule["extensions"]]
+
+        if not os.path.exists(base_path):
+            logging.warning(f"Path does not exist: {base_path}")
+            continue
+
+        for root, _, files in os.walk(base_path, topdown=False):
+            for file_name in files:
+                if not any(file_name.lower().endswith(ext) for ext in extensions):
+                    continue
+
+                full_path = os.path.join(root, file_name)
+
+                try:
+                    if is_older_than(full_path, retention_days):
+                        if delete_count >= max_deletes:
+                            logging.warning("Max delete limit reached, stopping cleanup")
+                            return
+
+                        if dry_run:
+                            logging.info(f"[DRY-RUN] Delete file: {full_path}")
+                        else:
+                            os.remove(full_path)
+                            logging.info(f"Deleted file: {full_path}")
+
+                        delete_count += 1
+                        touched_dirs.add(root)
+
+                except Exception as e:
+                    logging.error(f"Failed processing file {full_path}: {e}")
+
+    # ---------------------------------------------------------
+    # DELETE EMPTY DIRECTORIES (ONLY WHERE FILES WERE REMOVED)
+    # ---------------------------------------------------------
+    for directory in touched_dirs:
+        try:
+            if not os.listdir(directory):
+                if dry_run:
+                    logging.info(f"[DRY-RUN] Delete folder: {directory}")
+                else:
+                    os.rmdir(directory)
+                    logging.info(f"Deleted folder: {directory}")
+        except Exception:
+            pass
+
+    logging.info(f"Cleanup completed. Total files deleted: {delete_count}")
+
+# ---------------------------------------------------------
+# ENTRY POINT
+# ---------------------------------------------------------
+if __name__ == "__main__":
+    main()
+
+
