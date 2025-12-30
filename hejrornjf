@@ -1,0 +1,154 @@
+import os
+import json
+import socket
+import logging
+from datetime import datetime, timedelta
+
+HOSTNAME = socket.gethostname().upper()
+
+BASE_CONFIG = r"C:\cleanup\cleanup_rules.json"
+
+def load_config():
+    with open(BASE_CONFIG) as f:
+        return json.load(f)
+
+def is_old(path, days):
+    return datetime.fromtimestamp(os.path.getmtime(path)) < datetime.now() - timedelta(days=days)
+
+def main():
+    cleanup_enabled = os.getenv("CLEANUP_ENABLED", "false").lower() == "true"
+    dry_run = os.getenv("CLEANUP_DRY_RUN", "true").lower() == "true"
+
+    if not cleanup_enabled:
+        return
+
+    cfg = load_config()
+
+    base_dir = cfg["global"]["base_dir"]
+    log_dir = cfg["global"]["log_dir"]
+    max_deletes = cfg["global"].get("max_deletes", 1000)
+
+    os.makedirs(log_dir, exist_ok=True)
+
+    log_file = os.path.join(log_dir, f"cleanup_{HOSTNAME}.log")
+    logging.basicConfig(
+        filename=log_file,
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(message)s"
+    )
+
+    rules = cfg.get("servers", {}).get(HOSTNAME, {}).get("paths", [])
+    if not rules:
+        logging.info("No cleanup rules for this server")
+        return
+
+    delete_count = 0
+    touched_dirs = set()
+
+    for rule in rules:
+        base_path = rule["path"]
+        ext = rule["extension"]
+        retention = rule["retention_days"]
+
+        for root, _, files in os.walk(base_path, topdown=False):
+            for f in files:
+                if not f.lower().endswith(ext.lower()):
+                    continue
+
+                full = os.path.join(root, f)
+                if is_old(full, retention):
+                    if delete_count >= max_deletes:
+                        logging.warning("Max delete limit reached")
+                        return
+
+                    if dry_run:
+                        logging.info(f"[DRY] Delete file: {full}")
+                    else:
+                        os.remove(full)
+                        logging.info(f"Deleted file: {full}")
+
+                    delete_count += 1
+                    touched_dirs.add(root)
+
+    for d in touched_dirs:
+        try:
+            if not os.listdir(d):
+                if dry_run:
+                    logging.info(f"[DRY] Delete folder: {d}")
+                else:
+                    os.rmdir(d)
+                    logging.info(f"Deleted folder: {d}")
+        except Exception:
+            pass
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+
+
+
+-----
+
+
+- name: Windows cleanup – JSON driven
+  hosts: all
+  gather_facts: no
+
+  tasks:
+    - meta: end_play
+      when: not cleanup_enabled | default(false)
+
+    - name: Ensure base directory exists
+      win_file:
+        path: C:\cleanup
+        state: directory
+
+    - name: Copy cleanup script
+      win_copy:
+        src: scripts/cleanup_agent.py
+        dest: C:\cleanup\cleanup_agent.py
+
+    - name: Copy cleanup config
+      win_copy:
+        src: config/cleanup_rules.json
+        dest: C:\cleanup\cleanup_rules.json
+
+    - name: Run cleanup
+      win_command: python C:\cleanup\cleanup_agent.py
+      environment:
+        CLEANUP_ENABLED: "{{ cleanup_enabled }}"
+        CLEANUP_DRY_RUN: "{{ cleanup_dry_run }}"
+
+
+--------
+
+
+pipeline {
+    agent any
+    options { timestamps() }
+
+    stages {
+        stage('Checkout') {
+            steps { checkout scm }
+        }
+
+        stage('Ping Hosts') {
+            steps {
+                sh 'ansible -i ansible/inventories/hosts.ini all -m win_ping'
+            }
+        }
+
+        stage('Run Cleanup') {
+            steps {
+                sh 'ansible-playbook -i ansible/inventories/hosts.ini ansible/playbook.yml'
+            }
+        }
+    }
+}
+
+------
+
+
