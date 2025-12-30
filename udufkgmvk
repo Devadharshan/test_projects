@@ -1,0 +1,60 @@
+pipeline {
+    agent any
+
+    parameters {
+        choice(
+            name: 'TARGET_GROUP',
+            choices: [
+                'NONE',
+                'IV2-STG-WIN-EMEA',
+                'IV2-PRD-WIN-EMEA',
+                'IV2-PRD-WIN-AMER',
+                'IV2-PRD-WIN-APAC',
+                'ALL'
+            ],
+            description: 'Select inventory group for housekeeping'
+        )
+    }
+
+    options {
+        timestamps()
+    }
+
+    stages {
+
+        stage('Validate Target Selection') {
+            steps {
+                script {
+                    if (params.TARGET_GROUP == 'NONE') {
+                        error("No TARGET_GROUP selected. Aborting.")
+                    }
+
+                    env.ANSIBLE_LIMIT = (
+                        params.TARGET_GROUP == 'ALL'
+                        ? 'all'
+                        : params.TARGET_GROUP
+                    )
+
+                    echo "Running housekeeping for: ${env.ANSIBLE_LIMIT}"
+                }
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Run Cleanup') {
+            steps {
+                sh """
+                ansible-playbook \
+                  -i ansible/inventories/hosts.ini \
+                  --limit ${env.ANSIBLE_LIMIT} \
+                  ansible/playbook.yml
+                """
+            }
+        }
+    }
+}
