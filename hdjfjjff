@@ -1,0 +1,101 @@
+/*
+ * Jenkinsfile – Windows Housekeeping via Ansible
+ * Includes certificate selection logic (IV2 / IV1)
+ */
+
+def cyberarkCAFile = "CA_Bundle.pem"   // Jenkins credential ID for CyberArk CA bundle
+
+// --------------------------------------------------
+// Certificate Map (AS PROVIDED)
+// --------------------------------------------------
+def certificateMap = [
+    EMEA: [
+        PRD: [ IV2: 'IV2AFOCUS-OPSP', IV1: 'AIM-IV1FOCUS-OPSP-EMEA-Cyberark' ],
+        STG: [ IV2: 'IV2AFOCUS-OPSP', IV1: 'AIM-IV1FOCUS-OPSP-EMEA-Cyberark' ],
+        DEV: [ IV2: 'IV2AFOCUS-OPSD', IV1: 'AIM-FOCUS-OPSD-Cyberark' ]
+    ],
+    AMER: [
+        PRD: [ IV2: 'IV2RFOCUS-OPSP', IV1: 'AIM-FOCUS-NAR-OPSP-Cyberark' ],
+        STG: [ IV2: 'IV2RFOCUS-OPSP', IV1: 'AIM-FOCUS-NAR-OPSP-Cyberark' ],
+        DEV: [ IV2: 'IV2RFOCUS-OPSD', IV1: 'AIM-FOCUS-NAR-OPSD' ]
+    ],
+    APAC: [
+        PRD: [ IV2: 'IV2CFOCUS-OPSP', IV1: 'AIM-FOCUS-APAC-OPSP-Cyberark' ],
+        STG: [ IV2: 'IV2CFOCUS-OPSP', IV1: 'AIM-FOCUS-APAC-OPSP-Cyberark' ],
+        DEV: [ IV2: 'IV2CFOCUS-OPSD', IV1: 'AIM-FOCUS-APAC-OPSD' ]
+    ]
+]
+
+pipeline {
+
+    agent {
+        label params.REGION == 'EMEA' ? 'bnpp-deploytools' :
+              params.REGION == 'APAC' ? 'bnpp-deploytools-apac' :
+              params.REGION == 'AMER' ? 'bnpp-deploytools-amer' :
+              params.INFRA_TYPE == 'ETS' ? "${REGION}" : params.REGION
+    }
+
+    parameters {
+        choice(name: 'REGION', choices: ['EMEA', 'AMER', 'APAC'], description: 'Target region')
+        choice(name: 'ENVIRONMENT_TYPE', choices: ['DEV', 'STG', 'PRD'], description: 'Environment')
+    }
+
+    options {
+        timestamps()
+    }
+
+    stages {
+
+        // --------------------------------------------------
+        // Select Certificates
+        // --------------------------------------------------
+        stage('Select Certificates') {
+            steps {
+                script {
+                    def certBase = certificateMap[params.REGION][params.ENVIRONMENT_TYPE]['IV2']
+
+                    env.cyberarkCertFile = "${certBase}.crt"
+                    env.cyberarkKeyFile  = "${certBase}.key"
+                    env.cyberarkCAFile   = cyberarkCAFile
+
+                    echo "Selected certificate base: ${certBase}"
+                    echo "Cert file: ${env.cyberarkCertFile}"
+                    echo "Key file: ${env.cyberarkKeyFile}"
+                }
+            }
+        }
+
+        // --------------------------------------------------
+        // Checkout Repo
+        // --------------------------------------------------
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        // --------------------------------------------------
+        // Validate Connectivity
+        // --------------------------------------------------
+        stage('Ping Windows Hosts') {
+            steps {
+                sh '''
+                ansible -i ansible/inventories/hosts.ini all -m win_ping
+                '''
+            }
+        }
+
+        // --------------------------------------------------
+        // Run Housekeeping Cleanup
+        // --------------------------------------------------
+        stage('Run Housekeeping Cleanup') {
+            steps {
+                sh """
+                ansible-playbook \
+                  -i ansible/inventories/hosts.ini \
+                  ansible/playbook.yml
+                """
+            }
+        }
+    }
+}
