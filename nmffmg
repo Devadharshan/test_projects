@@ -1,0 +1,122 @@
+import os
+import json
+import socket
+import logging
+from datetime import datetime, timedelta
+
+# -------------------------------------------------
+# Constants
+# -------------------------------------------------
+HOSTNAME = socket.gethostname().upper()
+
+BASE_DIR = r"D:\APPS\Aps\housekeeping"
+CONFIG_FILE = os.path.join(BASE_DIR, "cleanup.json")
+
+# -------------------------------------------------
+# Helpers
+# -------------------------------------------------
+def load_config():
+    with open(CONFIG_FILE, "r") as f:
+        return json.load(f)
+
+def is_older_than(file_path, retention_days):
+    cutoff = datetime.now() - timedelta(days=retention_days)
+    return datetime.fromtimestamp(os.path.getmtime(file_path)) < cutoff
+
+def ensure_dir(path):
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+# -------------------------------------------------
+# Main
+# -------------------------------------------------
+def main():
+
+    cleanup_enabled = os.getenv("CLEANUP_ENABLED", "false").lower() == "true"
+    dry_run = os.getenv("CLEANUP_DRY_RUN", "true").lower() == "true"
+
+    if not cleanup_enabled:
+        return
+
+    config = load_config()
+
+    global_cfg = config.get("global", {})
+    log_dir = global_cfg.get("log_dir", os.path.join(BASE_DIR, "logs"))
+    max_deletes = int(global_cfg.get("max_deletes", 1000))
+
+    ensure_dir(log_dir)
+
+    log_file = os.path.join(log_dir, "cleanup_{0}.log".format(HOSTNAME))
+    logging.basicConfig(
+        filename=log_file,
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(message)s"
+    )
+
+    logging.info("Cleanup started")
+
+    servers_cfg = config.get("servers", {})
+    server_cfg = servers_cfg.get(HOSTNAME)
+
+    if not server_cfg:
+        logging.info("No cleanup rules defined for this server")
+        return
+
+    rules = server_cfg.get("paths", [])
+    delete_count = 0
+    touched_dirs = set()
+
+    for rule in rules:
+        base_path = rule.get("path")
+        retention_days = int(rule.get("retention_days"))
+        extensions = [ext.lower() for ext in rule.get("extensions", [])]
+
+        if not os.path.exists(base_path):
+            logging.warning("Path does not exist: {0}".format(base_path))
+            continue
+
+        for root, dirs, files in os.walk(base_path, topdown=False):
+            for file_name in files:
+                if not any(file_name.lower().endswith(ext) for ext in extensions):
+                    continue
+
+                full_path = os.path.join(root, file_name)
+
+                try:
+                    if is_older_than(full_path, retention_days):
+
+                        if delete_count >= max_deletes:
+                            logging.warning("Max delete limit reached, stopping cleanup")
+                            return
+
+                        if dry_run:
+                            logging.info("File selected for deletion: {0}".format(full_path))
+                        else:
+                            os.remove(full_path)
+                            logging.info("Deleted file: {0}".format(full_path))
+
+                        delete_count += 1
+                        touched_dirs.add(root)
+
+                except Exception as e:
+                    logging.error("Failed processing file {0}: {1}".format(full_path, e))
+
+    # -------------------------------------------------
+    # Remove empty directories
+    # -------------------------------------------------
+    for directory in touched_dirs:
+        try:
+            if not os.listdir(directory):
+                if dry_run:
+                    logging.info("Directory selected for deletion: {0}".format(directory))
+                else:
+                    os.rmdir(directory)
+                    logging.info("Deleted directory: {0}".format(directory))
+        except Exception:
+            pass
+
+    logging.info("Cleanup completed. Total files deleted: {0}".format(delete_count))
+
+
+if __name__ == "__main__":
+    main()
