@@ -1,0 +1,101 @@
+// --------------------------------------------------
+// CyberArk CA bundle (Jenkins file credential ID)
+// --------------------------------------------------
+def cyberarkCAFile = "CA_Bundle.pem"
+
+// --------------------------------------------------
+// Certificate map (IV2 only – housekeeping)
+// --------------------------------------------------
+def certificateMap = [
+    EMEA: [
+        PRD: [ IV2: 'IV2AFOCUS-OPSP' ],
+        STG: [ IV2: 'IV2AFOCUS-OPSP' ],
+        DEV: [ IV2: 'IV2AFOCUS-OPSD' ]
+    ],
+    AMER: [
+        PRD: [ IV2: 'IV2RFOCUS-OPSP' ],
+        STG: [ IV2: 'IV2RFOCUS-OPSP' ],
+        DEV: [ IV2: 'IV2RFOCUS-OPSD' ]
+    ],
+    APAC: [
+        PRD: [ IV2: 'IV2CFOCUS-OPSP' ],
+        STG: [ IV2: 'IV2CFOCUS-OPSP' ],
+        DEV: [ IV2: 'IV2CFOCUS-OPSD' ]
+    ]
+]
+
+pipeline {
+
+    agent any   // ✅ No agent label (as you requested)
+
+    parameters {
+        choice(
+            name: 'REGION',
+            choices: ['EMEA', 'AMER', 'APAC'],
+            description: 'Target region'
+        )
+        choice(
+            name: 'ENVIRONMENT_TYPE',
+            choices: ['STG', 'PRD', 'DEV'],
+            description: 'Environment type'
+        )
+        booleanParam(
+            name: 'CLEANUP_DRY_RUN',
+            defaultValue: true,
+            description: 'Dry run (no files deleted)'
+        )
+    }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+    }
+
+    stages {
+
+        stage('Select CyberArk Certificates') {
+            steps {
+                script {
+                    def certBase = certificateMap[params.REGION][params.ENVIRONMENT_TYPE]['IV2']
+                    env.cyberarkCertFile = certBase + ".crt"
+                    env.cyberarkKeyFile  = certBase + ".key"
+
+                    echo "Selected CyberArk cert base: ${certBase}"
+                }
+            }
+        }
+
+        stage('Run Housekeeping (Ansible)') {
+            steps {
+                script {
+                    withCredentials([
+                        file(credentialsId: env.cyberarkCertFile, variable: 'CYBERARK_CERT'),
+                        file(credentialsId: env.cyberarkKeyFile,  variable: 'CYBERARK_KEY'),
+                        file(credentialsId: cyberarkCAFile,       variable: 'CYBERARK_CA')
+                    ]) {
+
+                        sh """
+                        cd ansible
+
+                        ansible-playbook \\
+                          -i inventories/hosts.ini \\
+                          playbooks/housekeeping.yml \\
+                          -e REGION=${REGION} \\
+                          -e ENVIRONMENT_TYPE=${ENVIRONMENT_TYPE} \\
+                          -e cleanup_dry_run=${CLEANUP_DRY_RUN} \\
+                          -e cyberark_cert=${CYBERARK_CERT} \\
+                          -e cyberark_key=${CYBERARK_KEY} \\
+                          -e cyberark_ca=${CYBERARK_CA}
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo "Housekeeping pipeline completed"
+        }
+    }
+}
