@@ -1,0 +1,141 @@
+/*
+=========================================================
+ Focus – Windows Housekeeping Pipeline
+=========================================================
+ - Pipeline-level agent (sample style)
+ - REGION + ENVIRONMENT only
+ - No TARGET_GROUP
+ - Ansible limit derived from inventory convention
+ - Python cleanup agent unchanged
+=========================================================
+*/
+
+/* ---------------- CYBERARK CONFIG ---------------- */
+
+def cyberarkCAFile = "CA_Bundle.pem"
+
+// Certificate mapping (used only for cert selection, not host targeting)
+def certificateMap = [
+    EMEA: [
+        PRD: [ IV2: 'IV2AFOCUS-OPSP' ],
+        STG: [ IV2: 'IV2AFOCUS-OPSP' ],
+        DEV: [ IV2: 'IV2AFOCUS-OPSD' ]
+    ],
+    AMER: [
+        PRD: [ IV2: 'IV2RFOCUS-OPSP' ],
+        STG: [ IV2: 'IV2RFOCUS-OPSP' ],
+        DEV: [ IV2: 'IV2RFOCUS-OPSD' ]
+    ],
+    APAC: [
+        PRD: [ IV2: 'IV2CFOCUS-OPSP' ],
+        STG: [ IV2: 'IV2CFOCUS-OPSP' ],
+        DEV: [ IV2: 'IV2CFOCUS-OPSD' ]
+    ]
+]
+
+pipeline {
+
+    /* ================= AGENT (EXACT SAMPLE STYLE) ================= */
+    agent {
+        label params.REGION == "EMEA" ? "bnpp-deploytools" :
+              params.REGION == "APAC" ? "bnpp-deploytools-apac" :
+              params.REGION == "AMER" ? "bnpp-deploytools-amer" :
+              params.INFRA_TYPE == "ETS" ? "${REGION}" :
+              params.REGION
+    }
+
+    options {
+        disableConcurrentBuilds()
+        timestamps()
+    }
+
+    /* ================= PARAMETERS ================= */
+    parameters {
+
+        choice(
+            name: 'REGION',
+            choices: ['EMEA', 'AMER', 'APAC'],
+            description: 'Region'
+        )
+
+        choice(
+            name: 'ENVIRONMENT_TYPE',
+            choices: ['STG', 'PRD', 'DEV'],
+            description: 'Environment type'
+        )
+
+        booleanParam(
+            name: 'DRY_RUN',
+            defaultValue: true,
+            description: 'Dry run (no deletions)'
+        )
+    }
+
+    environment {
+        SHARED_BITBUCKET_SSH_KEY = 'BITBUCKET_public_access_auth_usr'
+    }
+
+    stages {
+
+        /* ================= SELECT CERTIFICATES ================= */
+        stage('Select Certificates') {
+            steps {
+                script {
+                    def certBase = certificateMap[params.REGION][params.ENVIRONMENT_TYPE]['IV2']
+                    env.CYBERARK_CERT_FILE = "${certBase}.crt"
+                    env.CYBERARK_KEY_FILE  = "${certBase}.key"
+                    env.CYBERARK_CA_FILE   = cyberarkCAFile
+
+                    echo "------------------------------------"
+                    echo "REGION        : ${params.REGION}"
+                    echo "ENVIRONMENT   : ${params.ENVIRONMENT_TYPE}"
+                    echo "CERT BASE     : ${certBase}"
+                    echo "DRY RUN       : ${params.DRY_RUN}"
+                    echo "------------------------------------"
+                }
+            }
+        }
+
+        /* ================= SAFETY CHECK ================= */
+        stage('Safety Check') {
+            steps {
+                script {
+                    if (params.ENVIRONMENT_TYPE == 'PRD' && params.DRY_RUN == false) {
+                        echo "⚠️  WARNING: Running in PRD with deletions ENABLED"
+                    }
+                }
+            }
+        }
+
+        /* ================= RUN HOUSEKEEPING ================= */
+        stage('Run Housekeeping') {
+            steps {
+                script {
+
+                    // Inventory group must exactly match hosts.ini
+                    def inventoryLimit = "IV2-${params.ENVIRONMENT_TYPE}-WIN-${params.REGION}"
+
+                    echo "Using Ansible limit group: ${inventoryLimit}"
+
+                    sh """
+                        ansible-playbook \
+                          -i ansible/inventories/hosts.ini \
+                          ansible/playbook.yml \
+                          --limit ${inventoryLimit} \
+                          -e cleanup_dry_run=${params.DRY_RUN} \
+                          -e environment=${params.ENVIRONMENT_TYPE}
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Housekeeping completed successfully"
+        }
+        failure {
+            echo "❌ Housekeeping failed – check Jenkins & Ansible logs"
+        }
+    }
+}
