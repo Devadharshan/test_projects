@@ -1,0 +1,236 @@
+============================================================
+FOCUS HOUSEKEEPING AUTOMATION – DOCUMENTATION
+============================================================
+
+1. OVERVIEW
+------------------------------------------------------------
+Focus Housekeeping is a safe, controlled, and configurable
+cleanup automation solution built using:
+
+- Jenkins (trigger)
+- Ansible (Windows orchestration)
+- Python cleanup agent
+- JSON-based configuration
+
+The solution ensures:
+- Cleanup runs ONLY on explicitly configured servers
+- Safe-by-default execution (dry-run)
+- No accidental deletions
+- Full audit logging per server
+
+
+2. HIGH-LEVEL ARCHITECTURE
+------------------------------------------------------------
+Jenkins
+   |
+   v
+Ansible Playbook
+   |
+   v
+Windows Servers
+   |
+   v
+Python Cleanup Agent
+   |
+   v
+cleanup.json (server-specific rules)
+
+
+3. REPOSITORY STRUCTURE
+------------------------------------------------------------
+focus-ansible/
+
+├── ansible/
+│   ├── playbook.yml
+│   ├── inventories/
+│   │   └── hosts.ini
+│
+├── scripts/
+│   └── cleanup_agent.py
+│
+├── config/
+│   └── cleanup.json
+│
+├── JenkinsFile
+├── README.md
+
+
+4. EXECUTION FLOW
+------------------------------------------------------------
+1. Jenkins triggers the pipeline
+2. Ansible runs the housekeeping playbook
+3. Playbook:
+   - Creates housekeeping directories
+   - Copies Python script
+   - Copies cleanup.json
+   - Performs safety validations
+4. Python script:
+   - Reads cleanup.json
+   - Matches hostname
+   - Applies retention rules
+   - Performs dry-run or deletion
+5. Logs are written locally on each server
+
+
+5. SAFETY DESIGN PRINCIPLES
+------------------------------------------------------------
+- Cleanup is disabled by default
+- Dry-run is enabled by default
+- Cleanup runs only if hostname exists in cleanup.json
+- Hard exits on missing prerequisites
+- Max delete limit enforced
+
+
+6. ANSIBLE PLAYBOOK (FINAL VERSION)
+------------------------------------------------------------
+- name: Focus housekeeping
+  hosts: all
+  gather_facts: no
+
+  tasks:
+
+    - meta: end_play
+      when: cleanup_enabled | default(false) | bool == false
+
+    - name: Ensure housekeeping directory exists
+      win_file:
+        path: D:\APPS\Aps\housekeeping
+        state: directory
+
+    - name: Ensure log directory exists
+      win_file:
+        path: D:\APPS\Aps\housekeeping\logs
+        state: directory
+
+    - name: Copy housekeeping script
+      win_copy:
+        src: "{{ playbook_dir }}/../scripts/cleanup_agent.py"
+        dest: D:\APPS\Aps\housekeeping\cleanup_agent.py
+
+    - name: Copy housekeeping config
+      win_copy:
+        src: "{{ playbook_dir }}/../config/cleanup.json"
+        dest: D:\APPS\Aps\housekeeping\cleanup.json
+
+    - name: Verify housekeeping script exists
+      win_stat:
+        path: D:\APPS\Aps\housekeeping\cleanup_agent.py
+      register: script_check
+
+    - meta: end_play
+      when: not script_check.stat.exists
+
+    - name: Verify housekeeping config exists
+      win_stat:
+        path: D:\APPS\Aps\housekeeping\cleanup.json
+      register: config_check
+
+    - meta: end_play
+      when: not config_check.stat.exists
+
+    - name: Verify python is available
+      win_command: python --version
+      register: python_check
+      failed_when: python_check.rc != 0
+      changed_when: false
+
+    - name: Run housekeeping
+      win_command: >
+        python D:\APPS\Aps\housekeeping\cleanup_agent.py
+      environment:
+        CLEANUP_ENABLED: "{{ cleanup_enabled | string }}"
+        CLEANUP_DRY_RUN: "{{ cleanup_dry_run | default(true) | string }}"
+
+
+7. PYTHON CLEANUP AGENT – KEY BEHAVIOR
+------------------------------------------------------------
+- Reads cleanup.json
+- Detects hostname using:
+  socket.gethostname().upper()
+- Runs cleanup ONLY if hostname exists in JSON
+- Applies:
+  - Retention period
+  - File extension filtering
+  - Max delete limit
+  - Dry-run logic
+  - Empty directory cleanup
+
+
+8. CLEANUP.JSON STRUCTURE
+------------------------------------------------------------
+{
+  "global": {
+    "log_dir": "D:/APPS/Aps/housekeeping/logs",
+    "max_deletes": 1000
+  },
+  "servers": {
+    "EURV0II47893.XMP.NET.INTRA": {
+      "paths": [
+        {
+          "path": "D:/APPS/logs",
+          "extensions": [".log", ".out", ".err", ".zip"],
+          "retention_days": 7
+        }
+      ]
+    }
+  }
+}
+
+IMPORTANT:
+- Hostnames MUST be uppercase
+- Only listed servers are affected
+- Paths must be absolute
+
+
+9. ENVIRONMENT VARIABLES
+------------------------------------------------------------
+CLEANUP_ENABLED
+- true  → Cleanup allowed
+- false → Cleanup skipped
+
+CLEANUP_DRY_RUN
+- true  → No deletion, logging only
+- false → Actual deletion
+
+
+10. LOGGING & AUDIT
+------------------------------------------------------------
+Log location:
+D:\APPS\Aps\housekeeping\logs\cleanup_<HOSTNAME>.log
+
+Log contains:
+- Start and end time
+- Files selected
+- Files deleted
+- Errors
+- Total delete count
+
+
+11. FAILURE SCENARIOS & PROTECTION
+------------------------------------------------------------
+Cleanup disabled          → Play exits
+Server not in JSON        → Script exits
+Dry-run enabled           → No deletion
+Missing script/config     → Play exits
+Max delete limit reached  → Cleanup stops
+
+
+12. PRODUCTION READINESS CHECKLIST
+------------------------------------------------------------
+[X] Safe by default
+[X] Server-specific rules
+[X] Dry-run supported
+[X] Logging enabled
+[X] Jenkins controlled
+[X] Windows compatible
+
+
+13. SUMMARY
+------------------------------------------------------------
+Focus Housekeeping is an enterprise-grade, safe automation
+designed to prevent accidental data loss while enabling
+controlled cleanup across Windows servers.
+
+============================================================
+END OF DOCUMENT
+============================================================
