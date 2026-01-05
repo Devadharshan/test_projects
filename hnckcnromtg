@@ -1,0 +1,13 @@
+New-Service -Name "Prometheus" `
+ -BinaryPathName '"C:\Prometheus\prometheus.exe" --config.file="C:\Prometheus\prometheus.yml" --storage.tsdb.path="C:\Prometheus\data"' `
+ -DisplayName "Prometheus Server" `
+ -Description "Prometheus Monitoring Server" `
+ -StartupType Automatic
+
+
+
+New-Service -Name "Pushgateway" `
+ -BinaryPathName '"C:\Pushgateway\pushgateway.exe"' `
+ -DisplayName "Prometheus Pushgateway" `
+ -Description "Prometheus Pushgateway Service" `
+ -StartupType Automatic
