@@ -1,0 +1,161 @@
+import re
+from datetime import datetime
+from collections import defaultdict
+
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# ---------------- CONFIG ----------------
+LOG_FILE = r"C:\path\to\your\focus.log"
+PUSHGATEWAY = "http://localhost:9091"
+JOB_NAME = "focus_log_metrics"
+
+# ---------------- PROM REGISTRY ----------------
+registry = CollectorRegistry()
+
+g_memory = Gauge(
+    "focus_message_memory_bytes",
+    "Average memory used per message type",
+    ["message_type"],
+    registry=registry
+)
+
+g_rx_count = Gauge(
+    "focus_messages_rx_total",
+    "Number of Rx messages",
+    ["message_type"],
+    registry=registry
+)
+
+g_pr_to_cp = Gauge(
+    "focus_pr_to_cp_seconds",
+    "Average time from Pr to Cp",
+    ["message_type"],
+    registry=registry
+)
+
+g_rx_to_cp = Gauge(
+    "focus_rx_to_cp_seconds",
+    "Average time from Rx to Cp",
+    ["message_type"],
+    registry=registry
+)
+
+# ---------------- HELPERS ----------------
+def parse_time(date_str, time_str):
+    return datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S.%f")
+
+# ---------------- STORAGE ----------------
+messages = {}  # correlation_id -> data
+
+stats = defaultdict(lambda: {
+    "rx_count": 0,
+    "mem": [],
+    "pr_cp": [],
+    "rx_cp": [],
+})
+
+# ---------------- READ FILE ----------------
+with open(LOG_FILE, "r", encoding="utf-8", errors="ignore") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+
+        # Split by pipe (|) which is stable in your log
+        cols = [c.strip() for c in line.split("|")]
+
+        # Skip header or broken lines
+        if len(cols) < 10:
+            continue
+
+        # ---- Column mapping based on your screenshot ----
+        # 0 = Date
+        # 1 = Time
+        # 5 = Source
+        # 6 = Message Type (SERVER.BEAT, CACHE.RELOAD, etc)
+        # 7 = State (Rx / Pr / Cp)
+        # -3 = Correlation ID
+        # -1 = Memory
+
+        date_str = cols[0]
+        time_str = cols[1]
+        msg_type = cols[6]
+        state = cols[7]
+        corr_id = cols[-3]
+        mem_str = cols[-1]
+
+        if state not in ("Rx", "Pr", "Cp"):
+            continue
+
+        # Parse time
+        try:
+            ts = parse_time(date_str, time_str)
+        except:
+            continue
+
+        # Init message bucket
+        if corr_id not in messages:
+            messages[corr_id] = {
+                "type": msg_type,
+                "rx": None,
+                "pr": None,
+                "cp": None,
+                "mem": None,
+            }
+
+        # Fill states
+        if state == "Rx":
+            messages[corr_id]["rx"] = ts
+            stats[msg_type]["rx_count"] += 1
+
+        elif state == "Pr":
+            messages[corr_id]["pr"] = ts
+
+        elif state == "Cp":
+            messages[corr_id]["cp"] = ts
+            try:
+                messages[corr_id]["mem"] = float(mem_str)
+            except:
+                pass
+
+# ---------------- CALCULATE ----------------
+for corr_id, data in messages.items():
+    msg_type = data["type"]
+    rx = data["rx"]
+    pr = data["pr"]
+    cp = data["cp"]
+    mem = data["mem"]
+
+    if mem is not None:
+        stats[msg_type]["mem"].append(mem)
+
+    if pr and cp:
+        stats[msg_type]["pr_cp"].append((cp - pr).total_seconds())
+
+    if rx and cp:
+        stats[msg_type]["rx_cp"].append((cp - rx).total_seconds())
+
+# ---------------- EXPORT METRICS ----------------
+total_rx = 0
+
+for msg_type, s in stats.items():
+    total_rx += s["rx_count"]
+
+    if s["mem"]:
+        g_memory.labels(msg_type).set(sum(s["mem"]) / len(s["mem"]))
+
+    g_rx_count.labels(msg_type).set(s["rx_count"])
+
+    if s["pr_cp"]:
+        g_pr_to_cp.labels(msg_type).set(sum(s["pr_cp"]) / len(s["pr_cp"]))
+
+    if s["rx_cp"]:
+        g_rx_to_cp.labels(msg_type).set(sum(s["rx_cp"]) / len(s["rx_cp"]))
+
+# Safety metric so you always see something
+g_rx_count.labels("__total__").set(total_rx)
+
+# ---------------- PUSH ----------------
+push_to_gateway(PUSHGATEWAY, job=JOB_NAME, registry=registry)
+
+print("Metrics pushed successfully.")
