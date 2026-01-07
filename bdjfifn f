@@ -1,0 +1,173 @@
+from datetime import datetime
+from collections import defaultdict
+import re
+
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# ---------------- CONFIG ----------------
+LOG_FILE = r"C:\path\to\your\focus.log"
+PUSHGATEWAY = "http://localhost:9091"
+JOB_NAME = "focus_log_metrics"
+
+# ---------------- PROM REGISTRY ----------------
+registry = CollectorRegistry()
+
+g_memory = Gauge(
+    "focus_message_memory_bytes",
+    "Last seen memory used per message type",
+    ["message_type"],
+    registry=registry
+)
+
+g_rx_count = Gauge(
+    "focus_messages_rx_total",
+    "Number of Rx messages",
+    ["message_type"],
+    registry=registry
+)
+
+g_pr_to_cp = Gauge(
+    "focus_pr_to_cp_seconds",
+    "Last seen time from Pr to Cp",
+    ["message_type"],
+    registry=registry
+)
+
+g_rx_to_cp = Gauge(
+    "focus_rx_to_cp_seconds",
+    "Last seen time from Rx to Cp",
+    ["message_type"],
+    registry=registry
+)
+
+# ---------------- HELPERS ----------------
+def parse_time(date_str, time_str):
+    return datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S.%f")
+
+GUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+# ---------------- STORAGE ----------------
+
+# GUID based storage (only for timings & memory)
+by_guid = {}
+
+# Per message type stats
+stats = defaultdict(lambda: {
+    "rx_count": 0,        # counts ALL Rx, guid or not
+    "last_mem": None,
+    "last_pr_cp": None,
+    "last_rx_cp": None,
+})
+
+# ---------------- READ FILE ----------------
+with open(LOG_FILE, "r", encoding="utf-8", errors="ignore") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+
+        cols = [c.strip() for c in line.split("|")]
+        if len(cols) < 10:
+            continue
+
+        # ---- Column mapping ----
+        date_str = cols[0]
+        time_str = cols[1]
+        msg_type = cols[6]
+        state = cols[7]
+
+        try:
+            ts = parse_time(date_str, time_str)
+        except:
+            continue
+
+        s = stats[msg_type]
+
+        # ---------------- RX COUNT (FOR ALL) ----------------
+        if state == "Rx":
+            s["rx_count"] += 1
+
+        # ---------------- GUID PART (ONLY FOR TIMINGS/MEMORY) ----------------
+        m = GUID_RE.search(line)
+        if not m:
+            continue   # No GUID => skip timing/memory, but Rx already counted
+
+        guid = m.group(0)
+
+        if guid not in by_guid:
+            by_guid[guid] = {
+                "type": msg_type,
+                "rx": None,
+                "pr": None,
+                "cp": None,
+                "mem": None,
+                "pr_cp": None,
+            }
+
+        msg = by_guid[guid]
+
+        # ---------------- FILL STATES ----------------
+        if state == "Rx":
+            msg["rx"] = ts
+
+        elif state == "Pr":
+            msg["pr"] = ts
+
+        elif state == "Cp":
+            msg["cp"] = ts
+
+            # Memory
+            try:
+                msg["mem"] = float(cols[-1])
+            except:
+                pass
+
+            # Pr -> Cp time from log
+            try:
+                msg["pr_cp"] = float(cols[-2])
+            except:
+                pass
+
+# ---------------- AGGREGATE GUID RESULTS ----------------
+for guid, msg in by_guid.items():
+    msg_type = msg["type"]
+
+    rx = msg["rx"]
+    cp = msg["cp"]
+
+    # Only if Cp exists we update "last" values
+    if msg["mem"] is not None:
+        stats[msg_type]["last_mem"] = msg["mem"]
+
+    if msg["pr_cp"] is not None:
+        stats[msg_type]["last_pr_cp"] = msg["pr_cp"]
+
+    if rx and cp:
+        stats[msg_type]["last_rx_cp"] = (cp - rx).total_seconds()
+
+# ---------------- EXPORT METRICS ----------------
+total_rx = 0
+
+for msg_type, s in stats.items():
+    total_rx += s["rx_count"]
+
+    # Rx count (ALL messages)
+    g_rx_count.labels(msg_type).set(s["rx_count"])
+
+    # Last correct values (GUID-based)
+    if s["last_mem"] is not None:
+        g_memory.labels(msg_type).set(s["last_mem"])
+
+    if s["last_pr_cp"] is not None:
+        g_pr_to_cp.labels(msg_type).set(s["last_pr_cp"])
+
+    if s["last_rx_cp"] is not None:
+        g_rx_to_cp.labels(msg_type).set(s["last_rx_cp"])
+
+# Safety metric
+g_rx_count.labels("__total__").set(total_rx)
+
+# ---------------- PUSH ----------------
+push_to_gateway(PUSHGATEWAY, job=JOB_NAME, registry=registry)
+
+print("Metrics pushed successfully.")
