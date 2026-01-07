@@ -1,0 +1,169 @@
+from datetime import datetime
+from collections import defaultdict
+import re
+
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# ---------------- CONFIG ----------------
+LOG_FILE = r"C:\path\to\your\focus.log"
+PUSHGATEWAY = "http://localhost:9091"
+JOB_NAME = "focus_log_metrics"
+
+# ---------------- PROM REGISTRY ----------------
+registry = CollectorRegistry()
+
+# Per GUID metrics (HIGH CARDINALITY!)
+g_memory = Gauge(
+    "focus_message_memory_bytes",
+    "Memory used per message (per GUID)",
+    ["message_type", "guid"],
+    registry=registry
+)
+
+g_pr_to_cp = Gauge(
+    "focus_pr_to_cp_seconds",
+    "Time from Pr to Cp per message (per GUID)",
+    ["message_type", "guid"],
+    registry=registry
+)
+
+g_rx_to_cp = Gauge(
+    "focus_rx_to_cp_seconds",
+    "Time from Rx to Cp per message (per GUID)",
+    ["message_type", "guid"],
+    registry=registry
+)
+
+# Aggregated Rx counter (safe)
+g_rx_count = Gauge(
+    "focus_messages_rx_total",
+    "Number of Rx messages",
+    ["message_type"],
+    registry=registry
+)
+
+# ---------------- HELPERS ----------------
+def parse_time(date_str, time_str):
+    return datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S.%f")
+
+GUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+# ---------------- STORAGE ----------------
+by_guid = {}   # guid -> data
+rx_counts = defaultdict(int)
+
+# ---------------- READ FILE ----------------
+with open(LOG_FILE, "r", encoding="utf-8", errors="ignore") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+
+        cols = [c.strip() for c in line.split("|")]
+        if len(cols) < 8:
+            continue
+
+        # ---- Column mapping (adjust if needed) ----
+        date_str = cols[0]
+        time_str = cols[1]
+        msg_type = cols[6]
+        state = cols[7]
+
+        try:
+            ts = parse_time(date_str, time_str)
+        except:
+            continue
+
+        # Count Rx for ALL messages
+        if state == "Rx":
+            rx_counts[msg_type] += 1
+
+        # Extract GUID
+        m = GUID_RE.search(line)
+        if not m:
+            continue
+
+        guid = m.group(0)
+
+        if guid not in by_guid:
+            by_guid[guid] = {
+                "type": msg_type,
+                "rx": None,
+                "pr": None,
+                "cp": None,
+                "mem": None,
+                "pr_cp": None,
+            }
+
+        msg = by_guid[guid]
+
+        # ---------------- FILL STATES ----------------
+        if state == "Rx":
+            msg["rx"] = ts
+
+        elif state == "Pr":
+            msg["pr"] = ts
+
+        elif state == "Cp":
+            msg["cp"] = ts
+
+            # ---- SMART numeric extraction from right side ----
+            mem_val = None
+            prcp_val = None
+
+            for c in reversed(cols):
+                c = c.strip()
+                if not c:
+                    continue
+
+                # Memory = big integer
+                if mem_val is None and c.isdigit() and len(c) > 6:
+                    try:
+                        mem_val = float(c)
+                        continue
+                    except:
+                        pass
+
+                # pr->cp = small float
+                if prcp_val is None:
+                    try:
+                        v = float(c)
+                        if v < 100:   # heuristic
+                            prcp_val = v
+                    except:
+                        pass
+
+            msg["mem"] = mem_val
+            msg["pr_cp"] = prcp_val
+
+# ---------------- EXPORT METRICS ----------------
+
+# Per GUID metrics
+for guid, msg in by_guid.items():
+    msg_type = msg["type"]
+
+    # Memory
+    if msg["mem"] is not None:
+        g_memory.labels(msg_type, guid).set(msg["mem"])
+
+    # Pr -> Cp
+    if msg["pr_cp"] is not None:
+        g_pr_to_cp.labels(msg_type, guid).set(msg["pr_cp"])
+
+    # Rx -> Cp
+    if msg["rx"] and msg["cp"]:
+        rx_cp = (msg["cp"] - msg["rx"]).total_seconds()
+        g_rx_to_cp.labels(msg_type, guid).set(rx_cp)
+
+# Aggregated Rx counts
+total_rx = 0
+for msg_type, cnt in rx_counts.items():
+    total_rx += cnt
+    g_rx_count.labels(msg_type).set(cnt)
+
+g_rx_count.labels("__total__").set(total_rx)
+
+# ---------------- PUSH ----------------
+push_to_gateway(PUSHGATEWAY, job=JOB_NAME, registry=registry)
+
+print(f"Pushed {len(by_guid)} message instances to Pushgateway.")
