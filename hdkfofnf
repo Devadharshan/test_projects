@@ -1,0 +1,196 @@
+import os
+import re
+from datetime import datetime
+from collections import defaultdict
+
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# ---------------- CONFIG ----------------
+LOG_DIR = r"C:\path\to\focus\logs"   # Folder containing log files
+PUSHGATEWAY = "http://localhost:9091"
+JOB_NAME = "focus_log_metrics"
+
+# ---------------- FILE NAME REGEX ----------------
+# Matches: FocusDM_Anything__2026-01-07.log
+FILENAME_RE = re.compile(r"^FocusDM_.*__(\d{4}-\d{2}-\d{2})\.log$", re.IGNORECASE)
+
+# ---------------- PROM REGISTRY ----------------
+registry = CollectorRegistry()
+
+# High-cardinality per message (per GUID) metrics
+g_memory = Gauge(
+    "focus_message_memory_bytes",
+    "Memory used per message (per GUID)",
+    ["message_type", "guid", "file_date"],
+    registry=registry
+)
+
+g_pr_to_cp = Gauge(
+    "focus_pr_to_cp_seconds",
+    "Time from Pr to Cp per message (per GUID)",
+    ["message_type", "guid", "file_date"],
+    registry=registry
+)
+
+g_rx_to_cp = Gauge(
+    "focus_rx_to_cp_seconds",
+    "Time from Rx to Cp per message (per GUID)",
+    ["message_type", "guid", "file_date"],
+    registry=registry
+)
+
+# Aggregated Rx count (safe)
+g_rx_count = Gauge(
+    "focus_messages_rx_total",
+    "Number of Rx messages",
+    ["message_type", "file_date"],
+    registry=registry
+)
+
+# ---------------- HELPERS ----------------
+def parse_time(date_str, time_str):
+    return datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S.%f")
+
+# GUID regex
+GUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+# ---------------- STORAGE ----------------
+# (short_guid, file_date) -> data
+by_guid = {}
+
+# (msg_type, file_date) -> rx_count
+rx_counts = defaultdict(int)
+
+# ---------------- PROCESS FILES ----------------
+for fname in os.listdir(LOG_DIR):
+    mfile = FILENAME_RE.match(fname)
+    if not mfile:
+        # Ignore any other .log or random file
+        continue
+
+    file_date = mfile.group(1)  # Extracted from filename
+    file_path = os.path.join(LOG_DIR, fname)
+
+    print(f"Processing {file_path}")
+
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+
+            # Split by pipe
+            cols = [c.strip() for c in line.split("|")]
+            if len(cols) < 8:
+                continue
+
+            # ---- Column mapping (based on your logs) ----
+            # 0 = Date
+            # 1 = Time
+            # 6 = Message Type
+            # 7 = State (Rx / Pr / Cp)
+            date_str = cols[0]
+            time_str = cols[1]
+            msg_type = cols[6]
+            state = cols[7]
+
+            try:
+                ts = parse_time(date_str, time_str)
+            except:
+                continue
+
+            # ---------------- RX COUNT (ALL MESSAGES) ----------------
+            if state == "Rx":
+                rx_counts[(msg_type, file_date)] += 1
+
+            # ---------------- GUID BASED (FOR TIMINGS/MEMORY) ----------------
+            mg = GUID_RE.search(line)
+            if not mg:
+                continue
+
+            full_guid = mg.group(0)
+            short_guid = full_guid[:12]   # Only first 12 characters
+
+            key = (short_guid, file_date)
+
+            if key not in by_guid:
+                by_guid[key] = {
+                    "type": msg_type,
+                    "file_date": file_date,
+                    "rx": None,
+                    "pr": None,
+                    "cp": None,
+                    "mem": None,
+                    "pr_cp": None,
+                }
+
+            msg = by_guid[key]
+
+            # ---------------- FILL STATES ----------------
+            if state == "Rx":
+                msg["rx"] = ts
+
+            elif state == "Pr":
+                msg["pr"] = ts
+
+            elif state == "Cp":
+                msg["cp"] = ts
+
+                # ---- SMART numeric extraction from right side ----
+                mem_val = None
+                prcp_val = None
+
+                for c in reversed(cols):
+                    c = c.strip()
+                    if not c:
+                        continue
+
+                    # Memory = big integer
+                    if mem_val is None and c.isdigit() and len(c) > 6:
+                        try:
+                            mem_val = float(c)
+                            continue
+                        except:
+                            pass
+
+                    # pr->cp = small float
+                    if prcp_val is None:
+                        try:
+                            v = float(c)
+                            if v < 100:   # heuristic
+                                prcp_val = v
+                        except:
+                            pass
+
+                msg["mem"] = mem_val
+                msg["pr_cp"] = prcp_val
+
+# ---------------- EXPORT METRICS ----------------
+
+# Per GUID metrics
+for (short_guid, file_date), msg in by_guid.items():
+    msg_type = msg["type"]
+
+    if msg["mem"] is not None:
+        g_memory.labels(msg_type, short_guid, file_date).set(msg["mem"])
+
+    if msg["pr_cp"] is not None:
+        g_pr_to_cp.labels(msg_type, short_guid, file_date).set(msg["pr_cp"])
+
+    if msg["rx"] and msg["cp"]:
+        rx_cp = (msg["cp"] - msg["rx"]).total_seconds()
+        g_rx_to_cp.labels(msg_type, short_guid, file_date).set(rx_cp)
+
+# Aggregated Rx counts
+total_rx = 0
+for (msg_type, file_date), cnt in rx_counts.items():
+    total_rx += cnt
+    g_rx_count.labels(msg_type, file_date).set(cnt)
+
+# Global safety metric
+g_rx_count.labels("__total__", "all").set(total_rx)
+
+# ---------------- PUSH ----------------
+push_to_gateway(PUSHGATEWAY, job=JOB_NAME, registry=registry)
+
+print(f"Pushed {len(by_guid)} message instances from {len(rx_counts)} message/date groups.")
