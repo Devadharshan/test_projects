@@ -1,0 +1,168 @@
+import os
+import re
+from datetime import datetime, date
+from collections import defaultdict
+
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+# ---------------- CONFIG ----------------
+LOG_DIR = r"C:\path\to\focus\logs"
+PUSHGATEWAY = "http://localhost:9091"
+JOB_NAME = "focus_log_metrics"
+
+TODAY_STR = date.today().strftime("%Y-%m-%d")
+
+# ---------------- FILE NAME REGEX ----------------
+# FocusDM_Anything__2026-01-07.log
+FILENAME_RE = re.compile(r"^FocusDM_.*__(\d{4}-\d{2}-\d{2})\.log$", re.IGNORECASE)
+
+# ---------------- GUID REGEX ----------------
+GUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+# ---------------- PROM ----------------
+registry = CollectorRegistry()
+
+g_memory = Gauge(
+    "focus_message_memory_bytes",
+    "Memory per message",
+    ["message_type", "guid", "file_date"],
+    registry=registry
+)
+
+g_pr_to_cp = Gauge(
+    "focus_pr_to_cp_seconds",
+    "Pr to Cp time per message",
+    ["message_type", "guid", "file_date"],
+    registry=registry
+)
+
+g_rx_to_cp = Gauge(
+    "focus_rx_to_cp_seconds",
+    "Rx to Cp time per message",
+    ["message_type", "guid", "file_date"],
+    registry=registry
+)
+
+g_rx_count = Gauge(
+    "focus_messages_rx_total",
+    "Number of Rx messages",
+    ["message_type", "file_date"],
+    registry=registry
+)
+
+# ---------------- STATE ----------------
+# For Rx->Cp calculation
+last_rx_time = {}
+
+# (msg_type, file_date) -> rx_count
+rx_counts = defaultdict(int)
+
+# ---------------- PROCESS FILES ----------------
+for fname in os.listdir(LOG_DIR):
+    m = FILENAME_RE.match(fname)
+    if not m:
+        continue
+
+    file_date = m.group(1)
+
+    # Skip today's live file
+    if file_date == TODAY_STR:
+        print(f"Skipping live file: {fname}")
+        continue
+
+    path = os.path.join(LOG_DIR, fname)
+    print(f"Processing {path}")
+
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            if "|" not in line:
+                continue
+
+            parts = line.split("|")
+            if len(parts) < 8:
+                continue
+
+            date_str = parts[0].strip()
+            time_str = parts[1].strip()
+            msg_type = parts[6].strip()
+            state = parts[7].strip()
+
+            # Count Rx for ALL messages
+            if state == "Rx":
+                rx_counts[(msg_type, file_date)] += 1
+
+            # Extract GUID
+            mg = GUID_RE.search(line)
+            if not mg:
+                continue
+
+            short_guid = mg.group(0)[:12]
+
+            # Parse timestamp
+            try:
+                ts = datetime.strptime(date_str + " " + time_str, "%Y-%m-%d %H:%M:%S.%f")
+            except:
+                continue
+
+            # ---------------- RX ----------------
+            if state == "Rx":
+                last_rx_time[(short_guid, file_date)] = ts
+                continue
+
+            # ---------------- CP ----------------
+            if state == "Cp":
+                mem_val = None
+                prcp_val = None
+
+                # Scan from right side for numbers
+                for c in reversed(parts):
+                    c = c.strip()
+                    if not c:
+                        continue
+
+                    # memory = big integer
+                    if mem_val is None and c.isdigit() and len(c) > 6:
+                        try:
+                            mem_val = float(c)
+                            continue
+                        except:
+                            pass
+
+                    # pr->cp = small float
+                    if prcp_val is None:
+                        try:
+                            v = float(c)
+                            if v < 100:
+                                prcp_val = v
+                        except:
+                            pass
+
+                    if mem_val is not None and prcp_val is not None:
+                        break
+
+                # Export memory
+                if mem_val is not None:
+                    g_memory.labels(msg_type, short_guid, file_date).set(mem_val)
+
+                # Export pr->cp
+                if prcp_val is not None:
+                    g_pr_to_cp.labels(msg_type, short_guid, file_date).set(prcp_val)
+
+                # Export rx->cp
+                rx_ts = last_rx_time.get((short_guid, file_date))
+                if rx_ts is not None:
+                    rx_cp = (ts - rx_ts).total_seconds()
+                    g_rx_to_cp.labels(msg_type, short_guid, file_date).set(rx_cp)
+
+# ---------------- EXPORT RX COUNTS ----------------
+total_rx = 0
+for (msg_type, file_date), cnt in rx_counts.items():
+    total_rx += cnt
+    g_rx_count.labels(msg_type, file_date).set(cnt)
+
+g_rx_count.labels("__total__", "all").set(total_rx)
+
+# ---------------- PUSH ----------------
+push_to_gateway(PUSHGATEWAY, job=JOB_NAME, registry=registry)
+
+print("Push complete.")
